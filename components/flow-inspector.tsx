@@ -6,7 +6,7 @@ import { Choice } from './editor-controls';
 
 export function ImportedFlowInspector({ project, ar }: { project: CodeProject; ar: boolean }) {
   const [path, setPath] = useState(''), [selected, setSelected] = useState(''), t = (en: string, a: string) => ar ? a : en;
-  const candidates = useMemo(() => project.files.filter(f => f.encoding === 'utf8' && f.path.endsWith('.json')).map(f => { try { const flow = inspectFlow(f.content); return flow ? { path: f.path, flow, error: '' } : null; } catch (e) { return { path: f.path, flow: null, error: (e as Error).message }; } }).filter(x => x !== null), [project.files]);
+  const candidates = useMemo(() => project.files.filter(f => f.encoding === 'utf8' && /\.json$/i.test(f.path)).map(f => { try { const flow = inspectFlow(f.content); return flow ? { path: f.path, flow, error: '' } : null; } catch (e) { return { path: f.path, flow: null, error: (e as Error).message }; } }).filter(x => x !== null), [project.files]);
   const item = candidates.find(f => f.path === path) || candidates[0], flow = item?.flow;
   const minX = flow?.nodes.length ? Math.min(...flow.nodes.map(n => n.x)) : 0, minY = flow?.nodes.length ? Math.min(...flow.nodes.map(n => n.y)) : 0;
   const positions = new Map(flow?.nodes.map(n => [n.id, { x: n.x - minX + 30, y: n.y - minY + 30 }]) || []);

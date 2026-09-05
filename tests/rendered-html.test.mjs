@@ -36,7 +36,8 @@ test("built Worker renders the workshop and routes its authenticated API", async
   assert.match(html, /الإنتاج والعمليات/);
   assert.match(html, /التصدير والنشر/);
   assert.match(html, /طريقة الاستخدام/);
-  assert.match(html, /البرمجة/);
+  assert.match(html, /الأدوات حسب الحاجة/);
+  assert.doesNotMatch(html, /<span>كود مخصص<\/span>/);
   assert.match(html, /workspace-overview/);
   assert.doesNotMatch(html, developmentPreviewMeta);
   assert.doesNotMatch(html, /Starter Project/);
