@@ -16,6 +16,9 @@ export type Project = {
     publications: any[];
     submissions: any[];
     tokens: any[];
+    entitlement: any;
+    requireReview: boolean;
+    reviews: any[];
 };
 export async function api<T = any>(path: string, options: {
     method?: string;

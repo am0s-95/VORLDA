@@ -4,8 +4,8 @@ export const metadata: Metadata = {
     title: "VORLDA · Creative Workshop",
     description: "One workshop for applications, images, films and characters. Build with connected parts and a transparent dollar wallet.",
     icons: {
-        icon: "/favicon.svg",
-        shortcut: "/favicon.svg",
+        icon: "/vorlda-icon.png",
+        shortcut: "/vorlda-icon.png",
     },
 };
 export default function RootLayout({ children, }: Readonly<{

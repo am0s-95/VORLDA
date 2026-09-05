@@ -5,6 +5,10 @@ import { checkout, portal, webhook } from './payments.ts';
 import { id, emptyGraph, createAssembly, validateGraph, checkPublish, descendants, type Graph } from '../lib/world.ts';
 import { compileHTML } from '../lib/compiler.ts';
 import { draftPlans, PLAN_IDS, testTariffs, type Plan, type Tariffs } from '../lib/money.ts';
+import { entitlement, storageUsage, reserveStorage, releaseStorage, requireStudio } from './entitlements.ts';
+import { productionApi, productionReady, productionCallback } from './production.ts';
+import { resourceApi } from './resources.ts';
+import { isTier } from '../lib/plans.ts';
 const graph = (v: unknown) => { try {
     return validateGraph(v);
 }
@@ -19,12 +23,14 @@ async function projectPayload(env: Env, p: any) {
         db(env).prepare('SELECT id,name,content_type,size,source,metadata,created_at FROM assets WHERE project_id=? ORDER BY created_at DESC').bind(p.id).all(),
         db(env).prepare('SELECT id,label,revision,actor,created_at FROM snapshots WHERE project_id=? ORDER BY created_at DESC LIMIT 100').bind(p.id).all(),
         db(env).prepare('SELECT * FROM comments WHERE project_id=? ORDER BY created_at DESC LIMIT 200').bind(p.id).all(),
-        db(env).prepare('SELECT id,email,role FROM members WHERE project_id=?').bind(p.id).all(),
+        db(env).prepare('SELECT m.id,m.email,m.role,COALESCE(b.monthly_limit,0) AS monthly_limit FROM members m LEFT JOIN member_budgets b ON b.member_id=m.id WHERE m.project_id=?').bind(p.id).all(),
         db(env).prepare('SELECT id,name,revision,enabled,created_at FROM publications WHERE project_id=? ORDER BY created_at DESC').bind(p.id).all(),
         db(env).prepare('SELECT * FROM submissions WHERE project_id=? ORDER BY created_at DESC LIMIT 200').bind(p.id).all(),
         db(env).prepare('SELECT id,name,scopes,max_charge,expires_at FROM api_tokens WHERE project_id=?').bind(p.id).all(),
     ]);
-    return { ...p, graph: JSON.parse(p.graph), draft: JSON.parse(p.draft), assets: assets.results, snapshots: snapshots.results, comments: comments.results, members: members.results, publications: publications.results, submissions: submissions.results, tokens: p.role === 'owner' ? tokens.results : [] };
+    const policies = await db(env).prepare('SELECT require_review FROM project_policies WHERE project_id=?').bind(p.id).first<any>();
+    const reviews = await db(env).prepare('SELECT r.*,u.name FROM publication_reviews r JOIN users u ON u.id=r.author WHERE project_id=? AND revision=?').bind(p.id,p.revision).all();
+    return { ...p, graph: JSON.parse(p.graph), draft: JSON.parse(p.draft), assets: assets.results, snapshots: snapshots.results, comments: comments.results, members: members.results, publications: publications.results, submissions: p.role === 'owner' ? submissions.results : [], tokens: p.role === 'owner' ? tokens.results : [], entitlement: await entitlement(env,p.owner), requireReview:!!policies?.require_review, reviews:reviews.results };
 }
 export async function handleApi(request: Request, env: Env, ctx: Context): Promise<Response | null> {
     const url = new URL(request.url), path = url.pathname;
@@ -33,12 +39,27 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
     try {
         if (path === '/api/payments/webhook' && request.method === 'POST')
             return json(await webhook(request, env));
+        const callback = await productionCallback(request,env);
+        if(callback) return callback;
         csrf(request);
         const user = await authenticate(request, env), method = request.method;
+        const resourceResponse = await resourceApi(request,env,user);
+        if(resourceResponse) return resourceResponse;
+        const productionResponse = await productionApi(request,env,user);
+        if(productionResponse) return productionResponse;
+        if(path === '/api/wallet/preview-plan' && method === 'POST') {
+            noToken(user);
+            if(billingMode(env) !== 'test') throw new ApiError(403,'Plan previews are available only in test mode.');
+            const b = await body(request,1000);
+            if(!isTier(b.planId)) throw new ApiError(400,'Choose one of the three plans or the wallet.');
+            await db(env).prepare('INSERT INTO plan_trials(owner,plan_id,updated_at) VALUES(?,?,?) ON CONFLICT(owner) DO UPDATE SET plan_id=excluded.plan_id,updated_at=excluded.updated_at').bind(user.id,b.planId,now()).run();
+            return json(await getWallet(env,user));
+        }
+        if(path === '/api/projects/archived' && method === 'GET') { noToken(user); return json((await db(env).prepare('SELECT id,name,updated_at FROM projects WHERE owner=? AND archived=1 ORDER BY updated_at DESC').bind(user.id).all()).results); }
         if (path === '/api/bootstrap' && method === 'GET') {
             noToken(user);
             const projects = await db(env).prepare('SELECT DISTINCT p.id,p.name,p.revision,p.updated_at,p.owner,CASE WHEN p.owner=? THEN ? ELSE m.role END AS role FROM projects p LEFT JOIN members m ON p.id=m.project_id WHERE (p.owner=? OR m.email=?) AND p.archived=0 ORDER BY p.updated_at DESC').bind(user.id, 'owner', user.id, user.email).all();
-            return json({ user, projects: projects.results, wallet: await getWallet(env, user), capabilities: { generation: false, reason: 'Connect an approved model provider to enable generation. Manual composition, storage and export are available.' } });
+            return json({ user, projects: projects.results, wallet: await getWallet(env, user), capabilities: { generation: productionReady(env), reason: 'Connect an approved model provider to enable generation. Manual composition, storage and export are available.' } });
         }
         if (path === '/api/wallet' && method === 'GET') {
             noToken(user);
@@ -68,7 +89,7 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
         if (path === '/api/admin/settings') {
             requireAdmin(user);
             if (method === 'GET')
-                return json({ plans: await setting(env, 'plans', draftPlans), tariffs: await setting(env, 'tariffs', testTariffs), mode: billingMode(env), providerReady: false, paymentsReady: !!env.STRIPE_SECRET_KEY && !!env.STRIPE_WEBHOOK_SECRET, paymentReviews: (await db(env).prepare("SELECT key,value FROM settings WHERE key LIKE 'payment_review:%'").all()).results });
+                return json({ plans: await setting(env, 'plans-v2', draftPlans), tariffs: {...await setting(env, 'tariffs', testTariffs),add:0,edit:0,connect:0,rule:0}, mode: billingMode(env), providerReady: productionReady(env), paymentsReady: !!env.STRIPE_SECRET_KEY && !!env.STRIPE_WEBHOOK_SECRET, paymentReviews: (await db(env).prepare("SELECT key,value FROM settings WHERE key LIKE 'payment_review:%'").all()).results });
             if (method === 'PUT') {
                 const b = await body(request, 30000);
                 if (!Array.isArray(b.plans) || b.plans.length !== 3 || new Set(b.plans.map((p: Plan) => p.id)).size !== 3 || b.plans.some((p: Plan) => !PLAN_IDS.includes(p.id)))
@@ -79,7 +100,7 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                 const old = await setting<Tariffs>(env, 'tariffs', testTariffs), t = b.tariffs as Tariffs;
                 if (!t || !['add', 'edit', 'connect', 'rule', 'run'].every(k => Number.isSafeInteger(t[k as keyof Tariffs]) && Number(t[k as keyof Tariffs]) >= 0 && Number(t[k as keyof Tariffs]) <= 1000000000) || typeof t.approved !== 'boolean')
                     throw new ApiError(400, 'Invalid usage tariff.');
-                await db(env).batch([db(env).prepare('INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').bind('plans', JSON.stringify(plans), now()), db(env).prepare('INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').bind('tariffs', JSON.stringify({ ...t, revision: old.revision + 1 }), now())]);
+                await db(env).batch([db(env).prepare('INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').bind('plans-v2', JSON.stringify(plans), now()), db(env).prepare('INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').bind('tariffs', JSON.stringify({ ...t, add:0,edit:0,connect:0,rule:0,revision: old.revision + 1 }), now())]);
                 return json({ saved: true });
             }
         }
@@ -152,7 +173,11 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
         }
         const match = path.match(/^\/api\/projects\/([-\w]+)(?:\/(.*))?$/);
         if (match) {
-            const projectId = match[1], action = match[2] || '', p = await projectAccess(env, user, projectId, method !== 'GET' && !['comments', 'submissions'].includes(action));
+            const projectId = match[1], action = match[2] || '', p = await projectAccess(env, user, projectId, method !== 'GET' && !['comments', 'submissions', 'reviews'].includes(action));
+            if(action === 'restore' && method === 'POST') { if(p.role !== 'owner') throw new ApiError(403,'Only the owner can restore this project.'); await db(env).prepare('UPDATE projects SET archived=0,updated_at=? WHERE id=?').bind(now(),p.id).run();return json({restored:true}); }
+            if(p.archived && method !== 'GET') throw new ApiError(409,'Restore this archived project before editing it.');
+            if(action === 'review-policy' && method === 'PUT') { noToken(user); if(p.role !== 'owner') throw new ApiError(403,'Only the owner can change review policy.');const b=await body(request,1000);if(b.required)await requireStudio(env,p.owner);if(typeof b.required!=='boolean')throw new ApiError(400,'Choose a review policy.');await db(env).prepare('INSERT INTO project_policies(project_id,require_review) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET require_review=excluded.require_review').bind(p.id,b.required?1:0).run();return json({saved:true}); }
+            if(action === 'reviews' && method === 'POST') { noToken(user);await requireStudio(env,p.owner);if(!['owner','reviewer'].includes(p.role))throw new ApiError(403,'Only the owner and reviewers can approve a revision.');const b=await body(request,6000);if(b.revision!==p.revision||!['approved','changes_requested'].includes(b.decision))throw new ApiError(409,'Review the current applied revision.');await db(env).prepare('INSERT INTO publication_reviews(id,project_id,revision,author,decision,note,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id,revision,author) DO UPDATE SET decision=excluded.decision,note=excluded.note,created_at=excluded.created_at').bind(id(),p.id,p.revision,user.id,b.decision,String(b.note||'').slice(0,2000),now()).run();return json({saved:true}); }
             if (action === '' && method === 'GET')
                 return json(await projectPayload(env, p));
             if (action === '' && method === 'PATCH') {
@@ -203,6 +228,8 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                 return json({ ...s, graph: JSON.parse(s.graph) });
             }
             if (action === 'publish' && method === 'POST') {
+                const policy=await db(env).prepare('SELECT require_review FROM project_policies WHERE project_id=?').bind(p.id).first<any>();
+                if(policy?.require_review){const e=await entitlement(env,p.owner);if(e.tier!=='studio')throw new ApiError(403,'Renew Studio or ask the owner to review the publication policy.');const review=await db(env).prepare("SELECT id FROM publication_reviews WHERE project_id=? AND revision=? AND decision='approved' AND (author=? OR author IN (SELECT u.id FROM users u JOIN members m ON m.email=u.email WHERE m.project_id=? AND m.role='reviewer')) AND NOT EXISTS(SELECT 1 FROM publication_reviews WHERE project_id=? AND revision=? AND decision='changes_requested') LIMIT 1").bind(p.id,p.revision,p.owner,p.id,p.id,p.revision).first();if(!review)throw new ApiError(409,'This revision needs approval before publishing.');}
                 const g = graph(JSON.parse(p.graph)), issues = checkPublish(g);
                 if (issues.some(i => i.severity === 'error'))
                     return json({ error: 'Resolve the publication checks first.', issues }, 409);
@@ -232,12 +259,14 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                 if (!types.includes(file.type))
                     throw new ApiError(400, 'Import PNG, JPEG, WebP, GIF, MP4, WebM, audio, CSV, JSON or PDF.');
                 const key = id(), objectKey = `projects/${p.id}/${key}`;
-                await env.BUCKET.put(objectKey, file.stream(), { httpMetadata: { contentType: file.type } });
+                const reservation=await reserveStorage(env,p.owner,p.id,file.size);
                 try {
-                    await db(env).prepare('INSERT INTO assets(id,owner,project_id,name,object_key,content_type,size,source,metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(key, user.id, p.id, file.name.slice(0, 200), objectKey, file.type, file.size, 'upload', '{}', now()).run();
+                    await env.BUCKET.put(objectKey, file.stream(), { httpMetadata: { contentType: file.type } });
+                    await db(env).batch([db(env).prepare('INSERT INTO assets(id,owner,project_id,name,object_key,content_type,size,source,metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(key, user.id, p.id, file.name.slice(0, 200), objectKey, file.type, file.size, 'upload', '{}', now()),db(env).prepare('DELETE FROM resource_reservations WHERE id=?').bind(reservation)]);
                 }
                 catch (e) {
                     await env.BUCKET.delete(objectKey);
+                    await releaseStorage(env,reservation);
                     throw e;
                 }
                 return json({ id: key, name: file.name, content_type: file.type, size: file.size, url: `/api/assets/${key}` }, 201);
@@ -259,11 +288,20 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                 noToken(user);
                 if (p.role !== 'owner')
                     throw new ApiError(403, 'Only the project owner can manage members.');
+                const ent=await requireStudio(env,p.owner);
                 const b = await body(request, 1000), email = String(b.email || '').trim().toLowerCase();
                 if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !['editor', 'viewer', 'reviewer'].includes(b.role))
                     throw new ApiError(400, 'Enter an email and a valid project role.');
-                await db(env).prepare('INSERT INTO members(id,project_id,email,role) VALUES(?,?,?,?) ON CONFLICT(project_id,email) DO UPDATE SET role=excluded.role').bind(id(), p.id, email, b.role).run();
+                if(email===user.email)throw new ApiError(400,'The owner already has access.');
+                const r=await db(env).prepare('INSERT INTO members(id,project_id,email,role) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM members m JOIN projects p ON p.id=m.project_id WHERE p.owner=? AND m.email=?) OR (SELECT COUNT(DISTINCT m.email) FROM members m JOIN projects p ON p.id=m.project_id WHERE p.owner=?)<? ON CONFLICT(project_id,email) DO UPDATE SET role=excluded.role').bind(id(),p.id,email,b.role,p.owner,email,p.owner,ent.members).run();
+                if(!r.meta.changes)throw new ApiError(409,'Studio includes four teammates plus the owner. Remove a teammate before adding another.');
                 return json({ saved: true });
+            }
+            if (action.startsWith('members/') && method === 'PATCH') {
+                noToken(user);if(p.role!=='owner')throw new ApiError(403,'Only the owner can assign spending allowances.');await requireStudio(env,p.owner);
+                const memberId=identifier(action.split('/')[1]),b=await body(request,1000),member=await db(env).prepare('SELECT id FROM members WHERE id=? AND project_id=?').bind(memberId,p.id).first();
+                if(!member)throw new ApiError(404,'Member not found.');if(!Number.isSafeInteger(b.monthlyLimit)||b.monthlyLimit<0||b.monthlyLimit>1000000000)throw new ApiError(400,'Enter a monthly allowance from $0 to $1,000.');
+                await db(env).prepare('INSERT INTO member_budgets(member_id,monthly_limit) VALUES(?,?) ON CONFLICT(member_id) DO UPDATE SET monthly_limit=excluded.monthly_limit').bind(memberId,b.monthlyLimit).run();return json({saved:true});
             }
             if (action.startsWith('members/') && method === 'DELETE') {
                 noToken(user);

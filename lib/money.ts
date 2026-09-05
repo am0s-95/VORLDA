@@ -17,7 +17,7 @@ export type Plan = {
     description: string;
     stripePriceId: string;
 };
-export const draftPlans: Plan[] = [{ id: 'starter', name: 'Starter', monthlyMicros: 0, grantMicros: 0, active: false, description: 'For individual projects', stripePriceId: '' }, { id: 'pro', name: 'Pro', monthlyMicros: 0, grantMicros: 0, active: false, description: 'For a regular creative practice', stripePriceId: '' }, { id: 'studio', name: 'Studio', monthlyMicros: 0, grantMicros: 0, active: false, description: 'For a studio and its shared work', stripePriceId: '' }];
+export const draftPlans: Plan[] = [{ id: 'starter', name: 'Starter', monthlyMicros: 29000000, grantMicros: 30000000, active: false, description: 'A personal production workspace', stripePriceId: '' }, { id: 'pro', name: 'Pro', monthlyMicros: 79000000, grantMicros: 90000000, active: false, description: 'Reusable brands and batch production', stripePriceId: '' }, { id: 'studio', name: 'Studio', monthlyMicros: 199000000, grantMicros: 250000000, active: false, description: 'Shared projects with controlled approvals', stripePriceId: '' }];
 export type Tariffs = {
     add: number;
     edit: number;
@@ -27,7 +27,7 @@ export type Tariffs = {
     revision: number;
     approved: boolean;
 };
-export const testTariffs: Tariffs = { add: 20000, edit: 5000, connect: 10000, rule: 10000, run: 1000, revision: 1, approved: false };
+export const testTariffs: Tariffs = { add: 0, edit: 0, connect: 0, rule: 0, run: 120000, revision: 2, approved: false };
 export function priceDiff(d: {
     added: string[];
     changed: string[];

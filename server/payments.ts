@@ -16,7 +16,7 @@ export async function checkout(env: Env, user: User, data: Record<string, any>) 
     const tariff = await setting<Tariffs>(env, 'tariffs', testTariffs);
     if (!tariff.approved)
         throw new ApiError(409, 'The owner must approve usage prices before accepting payments.');
-    const plans = await setting<Plan[]>(env, 'plans', draftPlans), kind = data.kind === 'subscription' ? 'subscription' : 'topup', nonce = String(data.requestId || '');
+    const plans = await setting<Plan[]>(env, 'plans-v2', draftPlans), kind = data.kind === 'subscription' ? 'subscription' : 'topup', nonce = String(data.requestId || '');
     if (!/^[-a-zA-Z0-9_]{16,100}$/.test(nonce))
         throw new ApiError(400, 'A checkout request identifier is required.');
     const checkoutId = `${user.id}:${nonce}`, prior = await db(env).prepare('SELECT * FROM checkouts WHERE id=?').bind(checkoutId).first<any>();
@@ -129,6 +129,8 @@ export async function webhook(request: Request, env: Env) {
                     await grantFunds(env, c.owner, 'live', grant, 'subscription', `stripe:invoice:${obj.id}`, 'Monthly subscription balance');
                 }
                 await db(env).prepare('INSERT INTO subscriptions(id,owner,mode,plan_id,status,customer_id,grant_micros,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at').bind(s.id, c.owner, 'live', c.plan_id, s.status, typeof s.customer === 'string' ? s.customer : s.customer.id, c.grant_micros, now()).run();
+                const period = s.current_period_end || s.items?.data?.[0]?.current_period_end || 0;
+                if (['subscription_create','subscription_cycle'].includes(obj.billing_reason)) await db(env).prepare('UPDATE subscriptions SET paid_until=MAX(paid_until,?) WHERE id=?').bind(period * 1000, s.id).run();
                 await db(env).prepare('UPDATE checkouts SET status=? WHERE id=?').bind('paid', c.id).run();
             }
         }

@@ -1,0 +1,1 @@
+ALTER TABLE `production_tasks` ADD `mode` text DEFAULT 'test' NOT NULL;

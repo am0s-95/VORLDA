@@ -38,6 +38,8 @@ export type Env = {
     STRIPE_WEBHOOK_SECRET?: string;
     APP_ORIGIN?: string;
     PROVIDER_ALLOWED_HOSTS?: string;
+    REPLICATE_API_TOKEN?: string;
+    REPLICATE_WEBHOOK_SECRET?: string;
     [key: string]: unknown;
 };
 export type Context = {
@@ -57,8 +59,7 @@ export async function setting<T>(env: Env, key: string, fallback: T): Promise<T>
 }>(); return row ? JSON.parse(row.value) : fallback; }
 export async function setSetting(env: Env, key: string, value: unknown) { await db(env).prepare('INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').bind(key, JSON.stringify(value), now()).run(); }
 export const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
-export async function body(request: Request, max = 4200000): Promise<Record<string, any>> { const text = await request.text(); if (text.length > max)
-    throw new ApiError(413, 'This request is too large.'); try {
+export async function body(request: Request, max = 4200000): Promise<Record<string, any>> { const reader=request.body?.getReader(),chunks:Uint8Array[]=[];let size=0;if(reader)for(;;){const r=await reader.read();if(r.done)break;size+=r.value.byteLength;if(size>max){await reader.cancel();throw new ApiError(413,'This request is too large.');}chunks.push(r.value);}const bytes=new Uint8Array(size);let offset=0;for(const c of chunks){bytes.set(c,offset);offset+=c.byteLength;}const text=new TextDecoder().decode(bytes);try {
     const v = JSON.parse(text);
     if (!v || typeof v !== 'object' || Array.isArray(v))
         throw Error();

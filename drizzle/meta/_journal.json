@@ -22,6 +22,20 @@
       "when": 1788603787710,
       "tag": "0002_flashy_lady_vermin",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1788606299369,
+      "tag": "0003_productive_ezekiel",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1788606397166,
+      "tag": "0004_new_changeling",
+      "breakpoints": true
     }
   ]
 }

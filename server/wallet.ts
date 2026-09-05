@@ -1,8 +1,9 @@
 import { ApiError, db, now, billingMode, setting, type Env } from './db.ts';
+import { entitlement, storageUsage } from './entitlements.ts';
 import { projectAccess, type User } from './auth.ts';
 import { id, validateGraph, diffGraph } from '../lib/world.ts';
 import { draftPlans, testTariffs, priceDiff, type Tariffs, type Plan } from '../lib/money.ts';
-export async function getWallet(env: Env, user: User) { const mode = billingMode(env); const wallet = await db(env).prepare('SELECT subscription,topup,mode FROM wallets WHERE owner=? AND mode=?').bind(user.id, mode).first<any>(); const ledger = await db(env).prepare('SELECT id,kind,amount,description,project_id,operation_id,created_at FROM ledger WHERE owner=? AND mode=? ORDER BY created_at DESC LIMIT 100').bind(user.id, mode).all(); const subs = await db(env).prepare('SELECT plan_id,status,id FROM subscriptions WHERE owner=? AND mode=? ORDER BY updated_at DESC').bind(user.id, mode).all(); return { ...(wallet || { subscription: 0, topup: 0, mode }), total: (wallet?.subscription || 0) + (wallet?.topup || 0), ledger: ledger.results, subscriptions: subs.results, plans: await setting<Plan[]>(env, 'plans', draftPlans), tariffs: await setting<Tariffs>(env, 'tariffs', testTariffs), paymentsReady: mode === 'live' && !!env.STRIPE_SECRET_KEY && !!env.STRIPE_WEBHOOK_SECRET }; }
+export async function getWallet(env: Env, user: User) { const mode = billingMode(env); const wallet = await db(env).prepare('SELECT subscription,topup,mode FROM wallets WHERE owner=? AND mode=?').bind(user.id, mode).first<any>(); const ledger = await db(env).prepare('SELECT id,kind,amount,description,project_id,operation_id,created_at FROM ledger WHERE owner=? AND mode=? ORDER BY created_at DESC LIMIT 100').bind(user.id, mode).all(); const subs = await db(env).prepare('SELECT plan_id,status,id FROM subscriptions WHERE owner=? AND mode=? ORDER BY updated_at DESC').bind(user.id, mode).all(); return { ...(wallet || { subscription: 0, topup: 0, mode }), total: (wallet?.subscription || 0) + (wallet?.topup || 0), ledger: ledger.results, subscriptions: subs.results, entitlement: await entitlement(env, user.id), storageUsed: await storageUsage(env, user.id), canPreviewPlans: mode === 'test', plans: await setting<Plan[]>(env, 'plans-v2', draftPlans), tariffs: { ...await setting<Tariffs>(env, 'tariffs', testTariffs), add: 0, edit: 0, connect: 0, rule: 0 }, paymentsReady: mode === 'live' && !!env.STRIPE_SECRET_KEY && !!env.STRIPE_WEBHOOK_SECRET }; }
 export async function quoteGraph(env: Env, user: User, projectId: string, graph: unknown, revision: number) {
     const p = await projectAccess(env, user, projectId, true);
     if (p.revision !== revision)
@@ -13,8 +14,8 @@ export async function quoteGraph(env: Env, user: User, projectId: string, graph:
             if (JSON.stringify(next.pieces.find(x => x.id === part.id)) !== JSON.stringify(part))
                 throw new ApiError(403, `The canonical part “${part.name}” is locked. Ask the owner or create a variant.`);
         }
-    const tariffs = await setting<Tariffs>(env, 'tariffs', testTariffs), diff = diffGraph(previous, next), price = priceDiff(diff, tariffs), mode = billingMode(env);
-    if (mode === 'live' && !tariffs.approved)
+    const tariffs = await setting<Tariffs>(env, 'tariffs', testTariffs), diff = diffGraph(previous, next), price = priceDiff(diff, { ...tariffs, add: 0, edit: 0, connect: 0, rule: 0 }), mode = billingMode(env);
+    if (mode === 'live' && price.total > 0 && !tariffs.approved)
         throw new ApiError(409, 'Usage prices must be approved before live execution.');
     const amount = price.total, quoteId = id(), details = { ...price, diff, mode };
     await db(env).prepare('INSERT INTO quotes(id,owner,project_id,revision,draft_revision,mode,kind,payload,amount,details,pricing_revision,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(quoteId, user.id, projectId, revision, p.draft_revision, mode, 'assembly', JSON.stringify(next), amount, JSON.stringify(details), tariffs.revision, Date.now() + 300000, now()).run();
@@ -24,7 +25,9 @@ export async function applyQuote(env: Env, user: User, quoteId: string, requestI
     const q = await db(env).prepare('SELECT * FROM quotes WHERE id=? AND owner=?').bind(quoteId, user.id).first<any>();
     if (!q)
         throw new ApiError(404, 'Quote not found.');
+    if (q.kind !== 'assembly') throw new ApiError(400, 'Use the production execution endpoint for a model operation.');
     const p = await projectAccess(env, user, q.project_id, true);
+    if (q.kind === 'assembly' && q.amount !== 0) throw new ApiError(409, 'Manual editing is now free. Request a new quote.');
     if (user.token && (!user.token.scopes.includes('execute') || q.amount > user.token.maxCharge))
         throw new ApiError(403, 'This integration is not approved to execute this charge.');
     const existing = await db(env).prepare('SELECT * FROM operations WHERE quote_id=? AND owner=?').bind(quoteId, user.id).first<any>();

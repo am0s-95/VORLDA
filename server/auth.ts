@@ -1,3 +1,4 @@
+import { entitlement } from './entitlements.ts';
 import { ApiError, db, now, billingMode, type Env } from './db.ts';
 export type User = {
     id: string;
@@ -38,7 +39,7 @@ export async function authenticate(request: Request, env: Env): Promise<User> {
 }
 export async function projectAccess(env: Env, user: User, projectId: string, write = false) { if (user.token && (user.token.projectId !== projectId || !user.token.scopes.includes(write ? 'write' : 'read')))
     throw new ApiError(403, 'This integration does not have the required project scope.'); const project = await db(env).prepare('SELECT p.*,m.role AS member_role FROM projects p LEFT JOIN members m ON m.project_id=p.id AND m.email=? WHERE p.id=?').bind(user.email, projectId).first<any>(); if (!project || (project.owner !== user.id && !project.member_role))
-    throw new ApiError(404, 'Project not found.'); const role = project.owner === user.id ? 'owner' : project.member_role; if (write && !['owner', 'editor'].includes(role))
+    throw new ApiError(404, 'Project not found.'); const role = project.owner === user.id ? 'owner' : project.member_role; if(write && role !== 'owner' && (await entitlement(env,project.owner)).tier !== 'studio') throw new ApiError(403,'Team editing requires an active Studio workspace. Existing work is still available to read and export.'); if (write && !['owner', 'editor'].includes(role))
     throw new ApiError(403, 'This project is read-only for your role.'); return { ...project, role }; }
 export function requireAdmin(user: User) { if (!user.admin || user.token)
     throw new ApiError(403, 'Only the workspace owner can change these settings.'); }
