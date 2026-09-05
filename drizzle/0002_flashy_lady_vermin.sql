@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `idx_pending_subscription` ON `checkouts` (`owner`,`mode`) WHERE "checkouts"."kind" = 'subscription' AND "checkouts"."status" IN ('pending','open');

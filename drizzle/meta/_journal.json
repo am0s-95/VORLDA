@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1788602025048,
+      "tag": "0000_chunky_crystal",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788602393592,
+      "tag": "0001_overrated_deathbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788603787710,
+      "tag": "0002_flashy_lady_vermin",
+      "breakpoints": true
+    }
+  ]
+}
