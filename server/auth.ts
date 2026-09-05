@@ -32,9 +32,10 @@ export async function authenticate(request: Request, env: Env): Promise<User> {
         catch { }
     }
     const user = { id: uid, email: email.toLowerCase(), name, admin: !!env.APP_OWNER_EMAIL && email.toLowerCase() === env.APP_OWNER_EMAIL.toLowerCase() };
-    await db(env).prepare('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name').bind(uid, user.email, name, now()).run();
     const mode = billingMode(env);
-    await db(env).prepare('INSERT INTO wallets(id,owner,mode,subscription,topup,updated_at) VALUES(?,?,?,0,0,?) ON CONFLICT(owner,mode) DO NOTHING').bind(`${uid}:${mode}`, uid, mode, now()).run();
+    const existing=await db(env).prepare('SELECT u.email,u.name,w.id AS wallet_id FROM users u LEFT JOIN wallets w ON w.owner=u.id AND w.mode=? WHERE u.id=?').bind(mode,uid).first<any>();
+    if(!existing || existing.email!==user.email || existing.name!==name) await db(env).prepare('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name').bind(uid,user.email,name,now()).run();
+    if(!existing?.wallet_id) await db(env).prepare('INSERT INTO wallets(id,owner,mode,subscription,topup,updated_at) VALUES(?,?,?,0,0,?) ON CONFLICT(owner,mode) DO NOTHING').bind(`${uid}:${mode}`,uid,mode,now()).run();
     return user;
 }
 export async function projectAccess(env: Env, user: User, projectId: string, write = false) { if (user.token && (user.token.projectId !== projectId || !user.token.scopes.includes(write ? 'write' : 'read')))

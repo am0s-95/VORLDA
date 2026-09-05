@@ -1,3 +1,5 @@
+
+import { validateProjectBundle } from "@/lib/project-io";
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as PE } from 'react';
 import { Box, Plus, Search, ChevronDown, ChevronRight, ArrowUpRight, MousePointer2, Hand, Link2, Type, Square, Image as ImageIcon, Video, Music2, LayoutTemplate, UserRound, FolderOpen, Upload, Download, Undo2, Redo2, Play, Pause, ZoomIn, ZoomOut, Maximize, Monitor, Smartphone, Settings2, Wallet, Check, Cloud, Copy, Trash2, Lock, EyeOff, MoveUpRight, CornerDownLeft, Group, PanelRight, GitBranch, X, ShieldCheck, AlertCircle, FileJson, SlidersHorizontal, Sparkles } from 'lucide-react';
@@ -15,10 +17,11 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Toaster } from '@/components/ui/sonner';
 import { toast } from 'sonner';
-import { type Graph, type Piece, type PieceType, type Rule, catalog, emptyGraph, id, clone, makePiece, children, absolutePosition, duplicateParts, removeParts, makeConnection, checkPublish, validateGraph, connectionStatus, diffGraph } from '@/lib/world';
+import { type Graph, type Piece, type PieceType, type Rule, catalog, emptyGraph, id, clone, effectivePiece, makePiece, children, absolutePosition, duplicateParts, removeParts, makeConnection, checkPublish, validateGraph, connectionStatus, diffGraph } from '@/lib/world';
 import { api, type Project } from '@/lib/client';
 import { money, testTariffs, priceDiff } from '@/lib/money';
 import { compileHTML } from '@/lib/compiler';
+import { TouchCamera, movePieces } from '@/lib/gestures';
 import { downloadBlob } from '@/lib/media';
 import { Choice, Field, TextField, Toggle, JsonField, IconButton } from '@/components/editor-controls';
 import { Inspector } from '@/components/inspector';
@@ -30,9 +33,11 @@ import { Modal, WalletPanel, PricingSettings, ExportPanel, ProjectPanel } from '
 export default function Workshop() {
     const [ar, setAr] = useState(true), [user, setUser] = useState<any>(null), [wallet, setWallet] = useState<any>({ total: 0, subscription: 0, topup: 0, mode: 'test', ledger: [], plans: [] }), [projects, setProjects] = useState<any[]>([]), [project, setProject] = useState<Project | null>(null), [g, setG] = useState<Graph>(emptyGraph), [selected, setSelected] = useState<string[]>([]), [scope, setScope] = useState<string | null>(null), [leftTab, setLeftTab] = useState('parts'), [search, setSearch] = useState(''), [tool, setTool] = useState('select'), [viewport, setViewport] = useState({ x: 90, y: 75, z: .65 }), [mobile, setMobile] = useState(false), [properties, setProperties] = useState(false), [connectionsVisible, setConnectionsVisible] = useState(true), [status, setStatus] = useState('loading'), [error, setError] = useState(''), [busy, setBusy] = useState(false), [modal, setModal] = useState(''), [command, setCommand] = useState(false), [prompt, setPrompt] = useState(''), [quote, setQuote] = useState<any>(null), [preview, setPreview] = useState(false), [newName, setNewName] = useState(''), [newKind, setNewKind] = useState('blank'), [archiveConfirm, setArchiveConfirm] = useState(false), [timeline, setTimeline] = useState(false), [time, setTime] = useState(0), [playing, setPlaying] = useState(false), [ruleName, setRuleName] = useState(''), [ruleScope, setRuleScope] = useState('global'), [ruleType, setRuleType] = useState('text'), [ruleColor, setRuleColor] = useState('#3d6dff'), [localHistory, setLocalHistory] = useState({ undo: 0, redo: 0 });
     const projectRef = useRef<Project | null>(null), graphRef = useRef(g), lastSaved = useRef(''), saving = useRef<Promise<void> | null>(null), undo = useRef<Graph[]>([]), redo = useRef<Graph[]>([]), canvasRef = useRef<HTMLDivElement>(null), uploadRef = useRef<HTMLInputElement>(null), importRef = useRef<HTMLInputElement>(null), panRef = useRef<any>(null), dragRef = useRef<any>(null), spaceRef = useRef(false), initialized = useRef(false), booting = useRef(false);
+    const touchCamera = useRef(new TouchCamera());
+    useEffect(() => { const reset=()=>{ touchCamera.current.reset(); dragRef.current=null; panRef.current=null; }; window.addEventListener('blur',reset); return ()=>window.removeEventListener('blur',reset); },[]);
     const t = useCallback((en: string, a: string) => ar ? a : en, [ar]), editable = !!project && ['owner', 'editor'].includes(project.role) && !busy, current = g.pieces.find(p => p.id === selected[0]), activeScope = scope ? g.pieces.find(p => p.id === scope) : null;
     const setGraph = useCallback((next: Graph) => { graphRef.current = next; setG(next); }, []);
-    const load = useCallback((p: Project) => { projectRef.current = p; setProject(p); lastSaved.current = JSON.stringify(p.draft); setGraph(p.draft); setSelected([]); setScope(null); setProperties(false); undo.current = []; redo.current = []; setLocalHistory({ undo: 0, redo: 0 }); setStatus('saved'); setError(''); }, [setGraph]);
+    const load = useCallback((p: Project) => { touchCamera.current.reset();dragRef.current=null;panRef.current=null;projectRef.current = p; setProject(p); lastSaved.current = JSON.stringify(p.draft); setGraph(p.draft); setSelected([]); setScope(null); setProperties(false); undo.current = []; redo.current = []; setLocalHistory({ undo: 0, redo: 0 }); setStatus('saved'); setError(''); }, [setGraph]);
     async function bootstrap() { if (booting.current)
         return; booting.current = true; setError(''); try {
         const r = await api('/api/bootstrap');
@@ -168,10 +173,18 @@ export default function Workshop() {
     } const points = parts.map(p => ({ ...absolutePosition(g, p), w: p.w, h: p.h })), x = Math.min(...points.map(p => p.x)), y = Math.min(...points.map(p => p.y)), w = Math.max(...points.map(p => p.x + p.w)) - x, h = Math.max(...points.map(p => p.y + p.h)) - y, z = Math.max(.08, Math.min(1.2, (box.width - 120) / w, (box.height - 130) / h)); setViewport({ x: (box.width - w * z) / 2 - x * z, y: (box.height - h * z) / 2 - y * z, z }); }
     function zoom(delta: number) { const box = canvasRef.current?.getBoundingClientRect(); if (!box)
         return; setViewport(v => { const z = Math.max(.08, Math.min(2.5, v.z * delta)), cx = box.width / 2, cy = box.height / 2; return { x: cx - (cx - v.x) * z / v.z, y: cy - (cy - v.y) * z / v.z, z }; }); }
-    function pointerPart(e: PE, p: Piece, resize = false, proxyId?: string) { if (e.button !== 0)
-        return; e.stopPropagation(); if (spaceRef.current || tool === 'hand') {
-        panRef.current = { sx: e.clientX, sy: e.clientY, ...viewport };
-        e.currentTarget.setPointerCapture(e.pointerId);
+    function canvasPoint(e: PE) { const box = canvasRef.current!.getBoundingClientRect(); return { x: e.clientX-box.left, y: e.clientY-box.top }; }
+    function captureTouch(e: PE) {
+        if (e.pointerType !== 'touch' || (e.target as HTMLElement).closest('.floating-tools,.selection-toolbar,.canvas-bottom,.canvas-welcome')) return;
+        if (touchCamera.current.down(e.pointerId,canvasPoint(e),viewport)) {
+            dragRef.current = null; panRef.current = null; setProperties(false);
+            canvasRef.current?.setPointerCapture(e.pointerId); e.preventDefault(); e.stopPropagation();
+        }
+    }
+    function pointerPart(e: PE, p: Piece, resize = false, proxyId?: string) { if (e.button !== 0 || touchCamera.current.blocked)
+        return; e.stopPropagation(); e.preventDefault(); if (spaceRef.current || tool === 'hand') {
+        panRef.current = { pointerId:e.pointerId, sx: e.clientX, sy: e.clientY, ...viewport };
+        canvasRef.current?.setPointerCapture(e.pointerId);
         return;
     } if (tool === 'connect' && !resize) {
         if (!selected[0])
@@ -182,40 +195,28 @@ export default function Workshop() {
             toast.success(t('Connection added.', 'أضيف الرابط.'));
         }
         return;
-    } const ids = e.shiftKey ? [...new Set([...selected, p.id])] : selected.includes(p.id) ? selected : [p.id]; setSelected(ids); setProperties(true); if (p.locked || !editable)
-        return; checkpoint(); dragRef.current = { sx: e.clientX, sy: e.clientY, graph: clone(graphRef.current), ids, resize, proxyId, pieceId: p.id }; e.currentTarget.setPointerCapture(e.pointerId); }
-    function pointerMove(e: PE) { if (panRef.current) {
+    } const ids = e.shiftKey ? [...new Set([...selected, p.id])] : selected.includes(p.id) ? selected : [p.id]; setSelected(ids); if (e.pointerType === 'touch') setProperties(false); if (p.locked || !editable)
+        return; const parent=g.pieces.find(x=>x.id===p.parentId),layout=parent&&effectivePiece(g,parent,mobile?'mobile':'desktop').style.layout;if(!resize&&!proxyId&&ids.length>1&&(layout==='row'||layout==='column')){toast.info(t('Select one item to reorder this row or column.','اختر عنصرًا واحدًا لإعادة ترتيب هذا الصف أو العمود.'));return;} dragRef.current = { pointerId:e.pointerId, started:false, sx: e.clientX, sy: e.clientY, zoom:viewport.z, graph: clone(graphRef.current), ids, resize, proxyId, pieceId: p.id }; canvasRef.current?.setPointerCapture(e.pointerId); }
+    function pointerMove(e: PE) {
+        e.stopPropagation();
+        if (e.pointerType === 'touch') { const camera=touchCamera.current.move(e.pointerId,canvasPoint(e)); if(camera) setViewport(camera); if(touchCamera.current.blocked) { e.preventDefault(); return; } }
+        if (panRef.current?.pointerId === e.pointerId) {
         const p = panRef.current;
         setViewport(v => ({ ...v, x: p.x + e.clientX - p.sx, y: p.y + e.clientY - p.sy }));
         return;
-    } const drag = dragRef.current; if (!drag)
-        return; const dx = (e.clientX - drag.sx) / viewport.z, dy = (e.clientY - drag.sy) / viewport.z, next = clone(drag.graph) as Graph, snap = (v: number) => e.altKey ? Math.round(v) : Math.round(v / 4) * 4; if (drag.proxyId) {
-        const h = next.proxies.find(h => h.id === drag.proxyId);
-        if (h) {
-            h.x = snap(h.x + dx);
-            h.y = snap(h.y + dy);
-        }
+    } const drag = dragRef.current; if (!drag || drag.pointerId !== e.pointerId)
+        return;
+        if (!drag.started) { if (Math.hypot(e.clientX-drag.sx,e.clientY-drag.sy) < (e.pointerType === 'touch' ? 6 : 3)) return; checkpoint(); drag.started=true; }
+        e.preventDefault();
+        setGraph(movePieces(drag,(e.clientX-drag.sx)/drag.zoom,(e.clientY-drag.sy)/drag.zoom,mobile,e.altKey));
     }
-    else
-        for (const p of next.pieces) {
-            if (!drag.ids.includes(p.id) || p.locked || drag.ids.includes(p.parentId))
-                continue;
-            const target = mobile ? p.mobile : p;
-            if (drag.resize && p.id === drag.pieceId) {
-                target.w = Math.max(16, snap(Number(target.w ?? p.w) + dx));
-                target.h = Math.max(16, snap(Number(target.h ?? p.h) + dy));
-            }
-            else if (!drag.resize) {
-                target.x = snap(Number(target.x ?? p.x) + dx);
-                target.y = snap(Number(target.y ?? p.y) + dy);
-            }
-        } setGraph(next); }
-    function pointerEnd() { dragRef.current = null; panRef.current = null; }
+    function pointerEnd(e: PE) { touchCamera.current.up(e.pointerId); if(dragRef.current?.pointerId === e.pointerId) dragRef.current=null; if(panRef.current?.pointerId === e.pointerId) panRef.current=null; }
     function backgroundPointer(e: PE) { if (e.button !== 0 && e.button !== 1)
-        return; if (e.target !== e.currentTarget)
-        return; if (tool === 'hand' || spaceRef.current || e.button === 1) {
-        panRef.current = { sx: e.clientX, sy: e.clientY, ...viewport };
-        e.currentTarget.setPointerCapture(e.pointerId);
+        return; if (touchCamera.current.blocked || (e.target !== e.currentTarget && !(e.target as HTMLElement).classList.contains('world-plane')))
+        return; if (tool === 'hand' || spaceRef.current || e.button === 1 || e.pointerType === 'touch') {
+        e.preventDefault();
+        panRef.current = { pointerId:e.pointerId, sx: e.clientX, sy: e.clientY, ...viewport };
+        canvasRef.current?.setPointerCapture(e.pointerId);
     }
     else {
         setSelected([]);
@@ -323,7 +324,7 @@ export default function Workshop() {
         return; setBusy(true); try {
         if (file.size > 100 * 1024 * 1024)
             throw Error('Project imports are limited to 100 MB.');
-        const data = JSON.parse(await file.text()), graph = validateGraph(data.graph || data);
+        const data = validateProjectBundle(JSON.parse(await file.text())), graph = data.graph;
         await saveDraft();
         const p = await api<Project>('/api/projects', { method: 'POST', body: { name: data.name || file.name, kind: 'blank' } }), replacements: Record<string, string> = {};
         for (const a of data.assets || []) {
@@ -368,7 +369,7 @@ export default function Workshop() {
  </SidebarContent><SidebarFooter><button className="sidebar-rule" onClick={() => setModal('production')}><Sparkles size={16}/><span>{t('Production & activity','الإنتاج والعمليات')}</span></button><button className="sidebar-rule" onClick={() => setModal('library')}><LayoutTemplate size={16}/><span>{t('My production library','مكتبة الإنتاج')}</span></button><button className="sidebar-rule" onClick={() => setModal('rules')}><SlidersHorizontal size={15}/><span>{t('Context & rules', 'السياق والقواعد')}</span><span className="counter">{g.rules.length}</span></button><div className="sidebar-account"><span className="avatar">{user?.name?.slice(0, 1) || 'V'}</span><div><strong>{user?.name || t('Your workspace', 'مساحتك')}</strong><small>{wallet.entitlement?.name || t('Wallet only', 'محفظة فقط')}</small></div>{user?.admin && <IconButton label={t('Pricing settings', 'إعدادات الأسعار')} onClick={() => setModal('settings')}><Settings2 size={15}/></IconButton>}</div></SidebarFooter></Sidebar>
  <main className={'main-stage ' + (properties && current ? 'with-inspector' : '')}><div className="stage-toolbar"><div className="row"><SidebarTrigger className="sidebar-toggle"/><span className="breadcrumb"><button onClick={() => { setScope(null); focus(); }}>{t('Workshop', 'الورشة')}</button>{scope && <><ChevronRight size={12}/><span>{activeScope?.name}</span><button aria-label="Exit scope" onClick={() => setScope(null)}><X size={12}/></button></>}</span><span className="draft-badge">{t('DRAFT', 'مسودة')}</span></div><div className="row stage-views"><IconButton label={t('Desktop layout', 'تصميم الحاسوب')} active={!mobile} onClick={() => setMobile(false)}><Monitor size={15}/></IconButton><IconButton label={t('Mobile overrides', 'تخصيص الجوال')} active={mobile} onClick={() => setMobile(true)}><Smartphone size={15}/></IconButton><span className="divider"/><IconButton label={t('Show connections', 'إظهار الروابط')} active={connectionsVisible} onClick={() => setConnectionsVisible(!connectionsVisible)}><GitBranch size={15}/></IconButton><IconButton label={t('Timeline', 'الخط الزمني')} active={timeline} onClick={() => setTimeline(!timeline)}><Video size={15}/></IconButton><IconButton label={t('Publication checks', 'فحص النشر')} onClick={() => setModal('checks')}><ShieldCheck size={15}/></IconButton><IconButton label={t('Export', 'تصدير')} onClick={() => setModal('export')} disabled={!project?.revision}><Download size={15}/></IconButton></div></div>
  {error && <div className="error-banner" role="alert"><AlertCircle size={16}/><span>{error}</span><Button size="sm" variant="outline" onClick={() => downloadBlob(new Blob([JSON.stringify({ name: project?.name, graph: graphRef.current }, null, 2)], { type: 'application/json' }), 'vorlda-local-draft.json')}>{t('Keep local draft', 'حفظ المسودة محليًا')}</Button><Button size="sm" variant="outline" onClick={() => bootstrap()}>{t('Reload', 'إعادة تحميل')}</Button></div>}
- <div className={'infinite-canvas ' + (tool === 'hand' ? 'hand-tool' : '') + (tool === 'connect' ? 'connect-tool' : '')} ref={canvasRef} onPointerDown={backgroundPointer} onPointerMove={pointerMove} onPointerUp={pointerEnd} onPointerCancel={pointerEnd} onWheel={e => { if (e.ctrlKey || e.metaKey) {
+ <div className={'infinite-canvas ' + (tool === 'hand' ? 'hand-tool' : '') + (tool === 'connect' ? 'connect-tool' : '')} ref={canvasRef} onPointerDownCapture={captureTouch} onPointerDown={backgroundPointer} onPointerMove={pointerMove} onPointerUp={pointerEnd} onPointerCancel={pointerEnd} onLostPointerCapture={pointerEnd} onWheel={e => { if (e.ctrlKey || e.metaKey) {
         zoom(e.deltaY > 0 ? .92 : 1.08);
     }
     else

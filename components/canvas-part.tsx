@@ -18,7 +18,7 @@ type Props = {
     proxyId?: string;
     onDown: (e: PointerEvent, p: Piece, resize?: boolean, proxyId?: string) => void;
     onMove: (e: PointerEvent) => void;
-    onUp: () => void;
+    onUp: (e: PointerEvent) => void;
     enter: (id: string) => void;
     choose: (id: string) => void;
     attach: (id: string) => void;
@@ -27,7 +27,7 @@ export function CanvasPart(props: Props) {
     const { graph: g, raw, selected, scope, mobile, time, playing, zoom, ar, proxyId, onDown, onMove, onUp, enter, choose, attach } = props, p = effectivePiece(g, raw, mobile ? 'mobile' : 'desktop'), chosen = selected.includes(p.id), Icon = partIcons[p.type] || Box;
     if (p.hidden)
         return null;
-    const style = partStyle(p) as CSSProperties, parent = g.pieces.find(a => a.id === p.parentId), flow = parent && ['row', 'column'].includes(String(effectivePiece(g, parent).style.layout));
+    const style = partStyle(p) as CSSProperties, parent = g.pieces.find(a => a.id === p.parentId), flow = parent && ['row', 'column'].includes(String(effectivePiece(g, parent,mobile ? 'mobile' : 'desktop').style.layout));
     if (flow) {
         style.position = 'relative';
         style.left = 0;

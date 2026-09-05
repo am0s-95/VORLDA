@@ -1,0 +1,45 @@
+import {createServer} from 'node:http';
+import {readFileSync,mkdirSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
+import {validateFormResponse} from './src/forms.ts';
+// Build on startup: validation and served HTML always use the same graph.
+import {project} from './build.mjs';
+const host=process.env.HOST||'127.0.0.1',port=Number(process.env.PORT||3000),publicMode=process.env.PUBLIC_APP==='1';
+if(!Number.isInteger(port)||port<0||port>65535)throw Error('Invalid PORT.');
+if(!['127.0.0.1','::1','localhost'].includes(host)&&!publicMode)throw Error('Non-loopback binding requires PUBLIC_APP=1 and APP_ORIGIN.');
+let origin=process.env.APP_ORIGIN||'';
+if(publicMode){const url=new URL(origin);if(url.protocol!=='https:'||url.origin!==origin)throw Error('Public mode needs an exact HTTPS APP_ORIGIN. Terminate TLS at your reverse proxy.');}
+const directory=new URL('./data/',import.meta.url);mkdirSync(directory,{recursive:true,mode:0o700});
+const db=new DatabaseSync(new URL('./data/forms.sqlite',import.meta.url));
+db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS submissions(id TEXT PRIMARY KEY,piece_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS limits(ip TEXT NOT NULL,window INTEGER NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(ip,window));');
+const html=readFileSync(new URL('./public/index.html',import.meta.url));
+const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: https:; media-src data: https:; connect-src 'self'; form-action 'self'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'"};
+function fail(status,message){return Object.assign(Error(message),{status});}
+const server=createServer({requestTimeout:15000,headersTimeout:10000,maxHeaderSize:16384},async(req,res)=>{
+ const send=(status,data)=>{res.writeHead(status,{...headers,'Content-Type':'application/json'});res.end(JSON.stringify(data));};
+ try{
+  if(!req.url?.startsWith('/')||req.url.startsWith('//')||req.headers.host!==new URL(origin).host)throw fail(403,'Host is not allowed.');
+  const path=new URL(req.url,origin).pathname;
+  if(req.method==='GET'&&(path==='/'||path==='/index.html')){res.writeHead(200,{...headers,'Content-Type':'text/html; charset=utf-8'});res.end(html);return;}
+  if(req.method==='GET'&&path==='/health'){send(200,{ok:true});return;}
+  if(req.method!=='POST'||path!=='/api/forms')throw fail(404,'Not found.');
+  // This is a public contact-form service, not authentication or a user database.
+  if(req.headers.origin!==origin)throw fail(403,'Origin is not allowed.');
+  if((req.headers['content-type']||'').split(';')[0]!=='application/json')throw fail(415,'JSON required.');
+  if(Number(req.headers['content-length'])>50000)throw fail(413,'Response too large.');
+  const window=Math.floor(Date.now()/60000),ip=createHash('sha256').update(req.socket.remoteAddress||'unknown').digest('hex');
+  db.prepare('DELETE FROM limits WHERE window<?').run(window-1);
+  const rate=db.prepare('INSERT INTO limits(ip,window,count) VALUES(?,?,1) ON CONFLICT(ip,window) DO UPDATE SET count=count+1 RETURNING count').get(ip,window);
+  if(rate.count>20)throw fail(429,'Too many responses. Try again later.');
+  const chunks=[];let size=0;
+  for await(const chunk of req){size+=chunk.length;if(size>50000)throw fail(413,'Response too large.');chunks.push(chunk);}
+  let b,data;try{b=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(!b||typeof b!=='object'||!/^[-\w]{8,100}$/.test(b.requestId||''))throw Error('Invalid request ID.');data=JSON.stringify(validateFormResponse(project.graph,b.pieceId,b.data));}catch(e){throw fail(400,e.message);}
+  const saved=db.prepare('SELECT piece_id,data FROM submissions WHERE id=?').get(b.requestId);
+  if(saved){if(saved.piece_id!==b.pieceId||saved.data!==data)throw fail(409,'Request ID already used for a different response.');send(200,{saved:true});return;}
+  db.prepare('INSERT INTO submissions(id,piece_id,data,created_at) VALUES(?,?,?,?)').run(b.requestId,b.pieceId,data,Date.now());
+  send(201,{saved:true});
+ }catch(e){send(e.status||500,{error:e.status?e.message:'Internal server error.'});}
+});
+server.listen(port,host,()=>{if(!publicMode)origin=`http://${host==='::1'?'[::1]':host}:${server.address().port}`;console.log('VORLDA app listening at '+origin);});
+for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>server.close(()=>{db.close();process.exit(0);}));

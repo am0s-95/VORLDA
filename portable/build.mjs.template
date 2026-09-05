@@ -1,0 +1,15 @@
+import {readFileSync,mkdirSync,writeFileSync,statSync} from 'node:fs';
+import {validateProjectBundle} from './src/project-io.ts';
+import {compileHTML} from './src/compiler.ts';
+import {checkPublish} from './src/world.ts';
+import {formFields,formIsVisible} from './src/forms.ts';
+if(statSync(new URL('./project.vorlda.json',import.meta.url)).size>64*1024*1024)throw Error('Project exceeds 64 MiB.');
+export const project=validateProjectBundle(JSON.parse(readFileSync(new URL('./project.vorlda.json',import.meta.url),'utf8')));
+const errors=checkPublish(project.graph).filter(x=>x.severity==='error');
+if(errors.length)throw Error(errors.map(x=>x.message).join('\n'));
+for(const p of project.graph.pieces.filter(x=>x.type==='form'&&formIsVisible(project.graph,x.id)))formFields(project.graph,p.id);
+const html=compileHTML(project.graph,{title:project.name,entry:project.entry,formEndpoint:'/api/forms',assetUrls:Object.fromEntries(project.assets.map(a=>[a.path,a.data]))});
+if(/\/api\/assets\/|blob:/.test(html))throw Error('Unresolved platform or temporary asset. Embed or replace it before building.');
+mkdirSync(new URL('./public/',import.meta.url),{recursive:true});
+writeFileSync(new URL('./public/index.html',import.meta.url),html);
+console.log('Built public/index.html');

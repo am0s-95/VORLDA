@@ -2,13 +2,15 @@ import { ApiError, db, json, body, identifier, cleanName, now, billingMode, sett
 import { authenticate, projectAccess, requireAdmin, csrf, digest, type User } from './auth.ts';
 import { getWallet, quoteGraph, applyQuote, grantFunds } from './wallet.ts';
 import { checkout, portal, webhook } from './payments.ts';
-import { id, emptyGraph, createAssembly, validateGraph, checkPublish, descendants, type Graph } from '../lib/world.ts';
+import { id, emptyGraph, createAssembly, validateGraph, checkPublish, type Graph } from '../lib/world.ts';
+import { validateFormResponse } from '../lib/forms.ts';
 import { compileHTML } from '../lib/compiler.ts';
 import { draftPlans, PLAN_IDS, testTariffs, type Plan, type Tariffs } from '../lib/money.ts';
 import { entitlement, storageUsage, reserveStorage, releaseStorage, requireStudio } from './entitlements.ts';
 import { productionApi, productionReady, productionCallback } from './production.ts';
 import { resourceApi } from './resources.ts';
 import { isTier } from '../lib/plans.ts';
+import { storeJson, loadJson, copyJson } from './payloads.ts';
 const graph = (v: unknown) => { try {
     return validateGraph(v);
 }
@@ -30,7 +32,8 @@ async function projectPayload(env: Env, p: any) {
     ]);
     const policies = await db(env).prepare('SELECT require_review FROM project_policies WHERE project_id=?').bind(p.id).first<any>();
     const reviews = await db(env).prepare('SELECT r.*,u.name FROM publication_reviews r JOIN users u ON u.id=r.author WHERE project_id=? AND revision=?').bind(p.id,p.revision).all();
-    return { ...p, graph: JSON.parse(p.graph), draft: JSON.parse(p.draft), assets: assets.results, snapshots: snapshots.results, comments: comments.results, members: members.results, publications: publications.results, submissions: p.role === 'owner' ? submissions.results : [], tokens: p.role === 'owner' ? tokens.results : [], entitlement: await entitlement(env,p.owner), requireReview:!!policies?.require_review, reviews:reviews.results };
+    const graphValue=await loadJson(env,'projects/'+p.id,p.graph),draftValue=p.graph===p.draft?graphValue:await loadJson(env,'projects/'+p.id,p.draft);
+    return { ...p, graph: graphValue, draft: draftValue, assets: assets.results, snapshots: snapshots.results, comments: comments.results, members: members.results, publications: publications.results, submissions: p.role === 'owner' ? submissions.results : [], tokens: p.role === 'owner' ? tokens.results : [], entitlement: await entitlement(env,p.owner), requireReview:!!policies?.require_review, reviews:reviews.results };
 }
 export async function handleApi(request: Request, env: Env, ctx: Context): Promise<Response | null> {
     const url = new URL(request.url), path = url.pathname;
@@ -79,7 +82,8 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
         if (path === '/api/projects' && method === 'POST') {
             noToken(user);
             const b = await body(request), projectId = id(), name = cleanName(b.name || 'Untitled assembly'), draft = b.graph ? graph(b.graph) : createAssembly(b.kind || 'blank'), time = now();
-            await db(env).prepare('INSERT INTO projects(id,owner,name,graph,draft,revision,created_at,updated_at) VALUES(?,?,?,?,?,0,?,?)').bind(projectId, user.id, name, JSON.stringify(emptyGraph()), JSON.stringify(draft), time, time).run();
+            const storedDraft=await storeJson(env,'projects/'+projectId,draft);
+            await db(env).prepare('INSERT INTO projects(id,owner,name,graph,draft,revision,created_at,updated_at) VALUES(?,?,?,?,?,0,?,?)').bind(projectId, user.id, name, JSON.stringify(emptyGraph()), storedDraft, time, time).run();
             return json(await projectPayload(env, await projectAccess(env, user, projectId)), 201);
         }
         if (path === '/api/quotes/apply' && method === 'POST') {
@@ -143,31 +147,18 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
             if (!pub)
                 throw new ApiError(404, 'This publication is unavailable.');
             await projectAccess(env, user, pub.project_id);
-            const g = graph(JSON.parse(pub.graph));
+            const g = graph(await loadJson(env,'projects/'+pub.project_id,pub.graph));
             if (!publicationMatch[2] && method === 'GET')
                 return htmlResponse(compileHTML(g, { title: pub.name, formEndpoint: `/p/${pub.id}/submit`, entry: url.searchParams.get('entry') || undefined }));
             if (publicationMatch[2] && method === 'POST') {
                 const b = await body(request, 50000), form = g.pieces.find(p => p.id === b.pieceId && p.type === 'form');
                 if (!form)
                     throw new ApiError(400, 'Form not found.');
-                if (!b.data || typeof b.data !== 'object' || Array.isArray(b.data))
-                    throw new ApiError(400, 'Invalid form response.');
-                const data: Record<string, string> = {};
-                for (const f of descendants(g, form.id).filter(p => p.type === 'input')) {
-                    const key = String(f.props.field || f.id);
-                    if (['__proto__', 'constructor', 'prototype'].includes(key))
-                        throw new ApiError(400, 'Invalid field name.');
-                    const v = String(b.data[key] ?? '').slice(0, 4000);
-                    if (f.props.required && !v.trim())
-                        throw new ApiError(400, `${f.name} is required.`);
-                    if (v && f.props.inputType === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v))
-                        throw new ApiError(400, `${f.name} requires an email address.`);
-                    if (v && f.props.inputType === 'number' && !Number.isFinite(Number(v)))
-                        throw new ApiError(400, `${f.name} requires a number.`);
-                    data[key] = v;
-                }
-                const requestId = identifier(b.requestId);
-                await db(env).prepare('INSERT INTO submissions(id,project_id,publication_id,piece_id,data,actor,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING').bind(await digest(pub.id + ':' + user.id + ':' + requestId), pub.project_id, pub.id, form.id, JSON.stringify(data), user.id, now()).run();
+                let data:Record<string,string>;try{data=validateFormResponse(g,form.id,b.data);}catch(e){throw new ApiError(400,(e as Error).message);}
+                const requestId = identifier(b.requestId),submissionId=await digest(pub.id + ':' + user.id + ':' + requestId),serialized=JSON.stringify(data);
+                await db(env).prepare('INSERT INTO submissions(id,project_id,publication_id,piece_id,data,actor,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING').bind(submissionId, pub.project_id, pub.id, form.id, serialized, user.id, now()).run();
+                const saved=await db(env).prepare('SELECT piece_id,data FROM submissions WHERE id=?').bind(submissionId).first<any>();
+                if(saved.piece_id!==form.id||saved.data!==serialized)throw new ApiError(409,'This request ID was already used for a different response.');
                 return json({ saved: true });
             }
         }
@@ -186,7 +177,9 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                     const draft = graph(b.draft);
                     if (!Number.isInteger(b.draftRevision) || !Number.isInteger(b.revision))
                         throw new ApiError(400, 'Project revisions are required.');
-                    const r = await db(env).prepare('UPDATE projects SET draft=?,draft_revision=draft_revision+1,updated_at=? WHERE id=? AND revision=? AND draft_revision=?').bind(JSON.stringify(draft), now(), p.id, b.revision, b.draftRevision).run();
+                    if(p.revision!==b.revision || p.draft_revision!==b.draftRevision) throw new ApiError(409,'A newer draft exists. Keep your local copy and reload before continuing.');
+                    const [storedDraft,storedGraph]=await Promise.all([storeJson(env,'projects/'+p.id,draft),copyJson(env,'projects/'+p.id,p.graph)]);
+                    const r = await db(env).prepare('UPDATE projects SET graph=?,draft=?,draft_revision=draft_revision+1,updated_at=? WHERE id=? AND revision=? AND draft_revision=?').bind(storedGraph,storedDraft, now(), p.id, b.revision, b.draftRevision).run();
                     if (!r.meta.changes)
                         throw new ApiError(409, 'A newer draft exists. Keep your local copy and reload before continuing.');
                     return json({ saved: true, draftRevision: b.draftRevision + 1 });
@@ -204,10 +197,10 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                 return json({ archived: true });
             }
             if (action === 'import' && method === 'POST') {
-                if (p.role !== 'owner' || p.revision !== 0 || JSON.parse(p.graph).pieces.length)
+                if (p.role !== 'owner' || p.revision !== 0 || (await loadJson(env,'projects/'+p.id,p.graph)).pieces.length)
                     throw new ApiError(409, 'Import into a new, empty project to preserve existing work.');
-                const b = await body(request), imported = JSON.stringify(graph(b.graph)), stamp = now(), snapshotId = id();
-                const result = await db(env).batch([db(env).prepare('UPDATE projects SET graph=?,draft=?,revision=1,draft_revision=draft_revision+1,updated_at=? WHERE id=? AND revision=0 AND draft_revision=?').bind(imported, imported, stamp, p.id, p.draft_revision), db(env).prepare('INSERT INTO snapshots(id,project_id,graph,label,revision,actor,created_at) SELECT ?,id,graph,?,revision,?,? FROM projects WHERE id=? AND revision=1 AND updated_at=?').bind(snapshotId, 'Imported original project', user.id, stamp, p.id, stamp)]);
+                const b = await body(request), imported = await storeJson(env,'projects/'+p.id,graph(b.graph),true), stamp = now(), snapshotId = id();
+                const result = await db(env).batch([db(env).prepare('UPDATE projects SET graph=?,draft=?,revision=1,draft_revision=draft_revision+1,updated_at=? WHERE id=? AND revision=0 AND draft_revision=?').bind(imported, imported, stamp, p.id, p.draft_revision), db(env).prepare('INSERT INTO snapshots(id,project_id,graph,label,revision,actor,created_at) SELECT ?,id,graph,?,revision,?,? FROM projects WHERE id=? AND revision=1 AND graph=?').bind(snapshotId, 'Imported original project', user.id, stamp, p.id, imported)]);
                 if (!result[0].meta.changes)
                     throw new ApiError(409, 'The project changed during import.');
                 return json({ imported: true, revision: 1 });
@@ -218,23 +211,23 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
             }
             if (action === 'snapshot' && method === 'POST') {
                 const b = await body(request, 1000);
-                await db(env).prepare('INSERT INTO snapshots(id,project_id,graph,label,revision,actor,created_at) VALUES(?,?,?,?,?,?,?)').bind(id(), p.id, p.graph, cleanName(b.label || 'Saved checkpoint', 100), p.revision, user.id, now()).run();
+                await db(env).prepare('INSERT INTO snapshots(id,project_id,graph,label,revision,actor,created_at) VALUES(?,?,?,?,?,?,?)').bind(id(), p.id, await copyJson(env,'projects/'+p.id,p.graph), cleanName(b.label || 'Saved checkpoint', 100), p.revision, user.id, now()).run();
                 return json({ saved: true });
             }
             if (action.startsWith('snapshots/') && method === 'GET') {
                 const s = await db(env).prepare('SELECT * FROM snapshots WHERE id=? AND project_id=?').bind(identifier(action.split('/')[1]), p.id).first<any>();
                 if (!s)
                     throw new ApiError(404, 'Snapshot not found.');
-                return json({ ...s, graph: JSON.parse(s.graph) });
+                return json({ ...s, graph: await loadJson(env,'projects/'+p.id,s.graph) });
             }
             if (action === 'publish' && method === 'POST') {
                 const policy=await db(env).prepare('SELECT require_review FROM project_policies WHERE project_id=?').bind(p.id).first<any>();
                 if(policy?.require_review){const e=await entitlement(env,p.owner);if(e.tier!=='studio')throw new ApiError(403,'Renew Studio or ask the owner to review the publication policy.');const review=await db(env).prepare("SELECT id FROM publication_reviews WHERE project_id=? AND revision=? AND decision='approved' AND (author=? OR author IN (SELECT u.id FROM users u JOIN members m ON m.email=u.email WHERE m.project_id=? AND m.role='reviewer')) AND NOT EXISTS(SELECT 1 FROM publication_reviews WHERE project_id=? AND revision=? AND decision='changes_requested') LIMIT 1").bind(p.id,p.revision,p.owner,p.id,p.id,p.revision).first();if(!review)throw new ApiError(409,'This revision needs approval before publishing.');}
-                const g = graph(JSON.parse(p.graph)), issues = checkPublish(g);
+                const g = graph(await loadJson(env,'projects/'+p.id,p.graph)), issues = checkPublish(g);
                 if (issues.some(i => i.severity === 'error'))
                     return json({ error: 'Resolve the publication checks first.', issues }, 409);
                 const key = id();
-                await db(env).prepare('INSERT INTO publications(id,project_id,owner,graph,revision,name,created_at) VALUES(?,?,?,?,?,?,?)').bind(key, p.id, user.id, p.graph, p.revision, p.name, now()).run();
+                await db(env).prepare('INSERT INTO publications(id,project_id,owner,graph,revision,name,created_at) VALUES(?,?,?,?,?,?,?)').bind(key, p.id, user.id, await copyJson(env,'projects/'+p.id,p.graph), p.revision, p.name, now()).run();
                 return json({ id: key, url: `/p/${key}`, issues });
             }
             if (action.startsWith('publications/') && method === 'DELETE') {
@@ -244,7 +237,7 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                 return json({ revoked: true });
             }
             if (action === 'export' && method === 'GET') {
-                const g = graph(JSON.parse(p.graph));
+                const g = graph(await loadJson(env,'projects/'+p.id,p.graph));
                 if (url.searchParams.get('format') === 'html')
                     return htmlResponse(compileHTML(g, { title: p.name }));
                 return json({ format: 'vorlda-project', exportedAt: now(), name: p.name, graph: g });
@@ -274,7 +267,7 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
             if (action === 'comments' && method === 'POST') {
                 const b = await body(request, 12000);
                 const piece = b.pieceId ? identifier(b.pieceId) : null;
-                if (piece && !graph(JSON.parse(p.draft)).pieces.some(x => x.id === piece))
+                if (piece && !graph(await loadJson(env,'projects/'+p.id,p.draft)).pieces.some(x => x.id === piece))
                     throw new ApiError(400, 'The comment target no longer exists.');
                 await db(env).prepare('INSERT INTO comments(id,project_id,piece_id,author,name,body,created_at) VALUES(?,?,?,?,?,?,?)').bind(id(), p.id, piece, user.id, user.name, cleanName(b.body, 5000), now()).run();
                 return json({ saved: true });

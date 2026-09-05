@@ -3,6 +3,7 @@ import { projectAccess, requireAdmin, type User } from './auth.ts';
 import { entitlement, reserveStorage, releaseStorage } from './entitlements.ts';
 import { id, validateGraph } from '../lib/world.ts';
 import { compileHTML } from '../lib/compiler.ts';
+import { loadJson } from './payloads.ts';
 import { testTariffs, type Tariffs } from '../lib/money.ts';
 type Task = {id:string;owner:string;actor:string;project_id:string;request_id:string;mode:string;kind:string;status:string;input:string;amount:number;from_subscription:number;from_topup:number;provider_id:string|null;output:string|null;error:string|null;created_at:string;updated_at:string};
 export const productionReady = (env:Env) => billingMode(env)==='live' && typeof env.REPLICATE_API_TOKEN==='string' && env.REPLICATE_API_TOKEN.length>10 && typeof env.REPLICATE_WEBHOOK_SECRET==='string' && env.REPLICATE_WEBHOOK_SECRET.length>=32 && typeof env.APP_ORIGIN==='string' && /^https:\/\//.test(env.APP_ORIGIN);
@@ -87,7 +88,7 @@ export async function productionApi(request:Request,env:Env,user:User):Promise<R
     if(action==='batch-export'&&method==='POST'){
         const b=await body(request,10000);if(!Array.isArray(b.projectIds)||!b.projectIds.length||b.projectIds.length>ent.batch)throw new ApiError(403,`Your plan allows up to ${ent.batch} projects in one batch.`);
         const files=[];let total=0;
-        for(const key of [...new Set(b.projectIds)] as string[]){const item=await projectAccess(env,user,identifier(key));if(item.owner!==p.owner)throw new ApiError(403,'A batch must belong to one workspace.');const g=validateGraph(JSON.parse(item.graph));if(!item.revision)throw new ApiError(409,'Apply each project before batch export.');if(/\/api\/assets\//.test(item.graph))throw new ApiError(409,'Export projects containing private media individually to embed their original assets.');const content=compileHTML(g,{title:item.name});total+=content.length;if(total>10000000)throw new ApiError(413,'This batch is too large. Export fewer projects.');files.push({name:item.name.replace(/[^\p{L}\p{N}_-]/gu,'_')+'-'+item.id.slice(0,6)+'.html',content});}return json({files});
+        for(const key of [...new Set(b.projectIds)] as string[]){const item=await projectAccess(env,user,identifier(key));if(item.owner!==p.owner)throw new ApiError(403,'A batch must belong to one workspace.');const g=validateGraph(await loadJson(env,'projects/'+item.id,item.graph));if(!item.revision)throw new ApiError(409,'Apply each project before batch export.');if(/\/api\/assets\//.test(JSON.stringify(g)))throw new ApiError(409,'Export projects containing private media individually to embed their original assets.');const content=compileHTML(g,{title:item.name});total+=content.length;if(total>10000000)throw new ApiError(413,'This batch is too large. Export fewer projects.');files.push({name:item.name.replace(/[^\p{L}\p{N}_-]/gu,'_')+'-'+item.id.slice(0,6)+'.html',content});}return json({files});
     }
     if(action==='quote'&&method==='POST'){
         const b=await body(request,16000),kind=b.kind=== 'billing-test'?'billing-test':'image';

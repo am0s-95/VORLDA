@@ -202,7 +202,7 @@ export function validateGraph(input: unknown): Graph {
     if (g.version !== 1 || !['pieces', 'connections', 'rules', 'proxies', 'entries'].every(k => Array.isArray((g as unknown as Record<string, unknown>)[k])))
         throw Error('Unsupported project format.');
     // Operational request budget; nested structure has no product-defined depth cap.
-    if (JSON.stringify(g).length > 4000000 || g.pieces.length > 20000)
+    if (new TextEncoder().encode(JSON.stringify(g)).byteLength > 4000000 || g.pieces.length > 20000)
         throw Error('This request exceeds the current processing budget. Split the project into linked assemblies.');
     const seen = new Set<string>();
     const safeId = (v: unknown) => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
@@ -280,7 +280,8 @@ export function checkPublish(g: Graph): Issue[] { const issues: Issue[] = []; co
     const status = connectionStatus(g, c);
     if (status === 'pending' || status === 'broken')
         issues.push({ severity: 'error', code: 'BROKEN_CONNECTION', message: `${c.label || 'Connection'} has no valid destination. Connect or disable it.`, target: c.id });
-} for (const p of g.pieces) {
+} for (const raw of g.pieces) {
+    const p=effectivePiece(g,raw);
     if (p.type === 'button' && p.props.action === 'navigate' && !g.connections.some(c => c.from === p.id && !c.disabled))
         issues.push({ severity: 'warning', code: 'NO_ACTION', message: `${p.name} has no navigation action.`, target: p.id });
     if (p.type === 'generator' && !p.hidden)

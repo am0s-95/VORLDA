@@ -31,6 +31,16 @@ export function compileHTML(input: Graph, options: {
     assetUrls?: Record<string, string>;
 } = {}) {
     const g = validateGraph(input), pages = g.pieces.filter(p => p.type === 'page' && !p.hidden), entry = options.entry || g.entries[0] || pages[0]?.id || '', mobile: string[] = [];
+    // Count expanded linked content and every embedded media reference BEFORE
+    // constructing HTML. A small original image reused many times is not small.
+    let estimatedBytes=0;const encoder=new TextEncoder();
+    for(const raw of g.pieces){const p=effectivePiece(g,raw);if(p.hidden)continue;
+        estimatedBytes+=encoder.encode(JSON.stringify(p)).byteLength*6+1024;
+        for(const value of [p.props.src,...(Array.isArray(p.props.images)?p.props.images:[]),...(Array.isArray(p.props.references)?p.props.references:[])]){
+            const replacement=options.assetUrls?.[String(value)];if(replacement)estimatedBytes+=encoder.encode(replacement).byteLength*(/[&<>"']/.test(replacement)?6:1);
+        }
+        if(estimatedBytes>32*1024*1024)throw Error('Expanded HTML exceeds the safe export budget. Reduce repeated media or split the project.');
+    }
     function render(raw: Piece): string {
         let p = effectivePiece(g, raw);
         if (p.hidden)
