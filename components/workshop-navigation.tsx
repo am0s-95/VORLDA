@@ -4,11 +4,13 @@ import { useSidebar } from '@/components/ui/sidebar';
 import { Button } from '@/components/ui/button';
 import { LayoutTemplate, Sparkles, Download, HelpCircle, Plus, Layers3, Code2, SlidersHorizontal, MoreHorizontal, Monitor, Smartphone, GitBranch, Video, ShieldCheck, MousePointer2, Hand, Link2, Group, Search } from 'lucide-react';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuItem, DropdownMenuLabel, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu';
+import { workspaceSaveState } from '@/lib/workshop-flow';
 import { toolMode, type ToolMode } from '@/lib/contextual-tools';
 
 export function CloseMobileTools({ selection, overlayOpen }: { selection: string; overlayOpen: boolean }) {
   const { isMobile, setOpenMobile } = useSidebar();
-  useEffect(() => { if (isMobile && (selection || overlayOpen)) setOpenMobile(false); }, [selection, overlayOpen, isMobile, setOpenMobile]);
+  useEffect(() => { if (isMobile && selection) setOpenMobile(false); }, [selection, isMobile, setOpenMobile]);
+  useEffect(() => { if (isMobile && overlayOpen) setOpenMobile(false); }, [overlayOpen, isMobile, setOpenMobile]);
   return null;
 }
 
@@ -17,14 +19,16 @@ export function MobileToolkitClose({ ar }: { ar: boolean }) {
   return <Button className="mobile-toolkit-close" variant="outline" onClick={() => setOpenMobile(false)}>{ar ? 'العودة للمشروع' : 'Back to project'}</Button>;
 }
 
-export function WorkshopNavigation({ ar, name, count, dirty, saved, ready, open, mode, showCode, onModeChange, prepareAdd, searchCommands }: {
-  ar: boolean; name: string; count: number; dirty: boolean; saved: boolean; ready: boolean; open: (panel: string) => void; mode: ToolMode; showCode: boolean; onModeChange: (mode: ToolMode) => void; prepareAdd: () => void; searchCommands: () => void;
+export function WorkshopNavigation({ ar, name, count, dirty, saveStatus, revision, ready, open, mode, showCode, onModeChange, prepareAdd, searchCommands }: {
+  ar: boolean; name: string; count: number; dirty: boolean; saveStatus: string; revision: number; ready: boolean; open: (panel: string) => void; mode: ToolMode; showCode: boolean; onModeChange: (mode: ToolMode) => void; prepareAdd: () => void; searchCommands: () => void;
 }) {
   const t = (en: string, a: string) => ar ? a : en;
   const { setOpenMobile } = useSidebar();
+  const state = workspaceSaveState(saveStatus, dirty, revision);
+  const saveLabels = { error: t('Draft not saved · review the error', 'المسودة غير محفوظة · راجع الخطأ'), loading: t('Opening project…', 'جار فتح المشروع…'), saving: t('Saving draft…', 'جار حفظ المسودة…'), unsaved: t('Changes waiting to save', 'تعديلات تنتظر الحفظ'), draft: t('Draft saved · not applied', 'مسودة محفوظة · لم تُعتمد'), applied: t('Applied version', 'نسخة معتمدة') };
   const displayOptions = <><DropdownMenuLabel>{t('Tool display on this device', 'عرض الأدوات على هذا الجهاز')}</DropdownMenuLabel><DropdownMenuRadioGroup value={mode} onValueChange={value => onModeChange(toolMode(value))}><DropdownMenuRadioItem value="auto">{t('Automatic · follow the project', 'تلقائي · حسب المشروع')}</DropdownMenuRadioItem><DropdownMenuRadioItem value="simple">{t('Simple · open extras when needed', 'مبسط · افتح الإضافات عند الحاجة')}</DropdownMenuRadioItem><DropdownMenuRadioItem value="advanced">{t('Advanced · show programming tools', 'متقدم · إظهار أدوات البرمجة')}</DropdownMenuRadioItem></DropdownMenuRadioGroup></>;
   return <section className="workspace-overview" dir={ar ? 'rtl' : 'ltr'}>
-    <div className="workspace-heading"><div><span className="eyebrow">{t('BUILD YOUR APPLICATION', 'ابنِ تطبيقك')}</span><h1>{name}</h1></div><div className="workspace-status" role="status"><Layers3 size={15}/><span>{count} {t('parts', 'قطعة')}</span><span className={'state-chip ' + (saved ? 'saved' : '')}>{!saved ? t('Saving draft…', 'جار حفظ المسودة…') : dirty ? t('Draft saved · not applied', 'مسودة محفوظة · لم تُعتمد') : t('Applied version', 'نسخة معتمدة')}</span></div></div>
+    <div className="workspace-heading"><div><span className="eyebrow">{t('BUILD YOUR APPLICATION', 'ابنِ تطبيقك')}</span><h1>{name}</h1></div><div className="workspace-status" role="status"><Layers3 size={15}/><span>{count} {t('parts', 'قطعة')}</span><span className={'state-chip ' + (state === 'draft' || state === 'applied' ? 'saved' : '')} data-save-state={state}>{saveLabels[state]}</span></div></div>
     <nav className="mobile-workshop-actions" aria-label={t('Workspace actions', 'إجراءات مساحة العمل')}>
       <Button variant="outline" disabled={!ready} onClick={() => { prepareAdd(); setOpenMobile(true); }}><Plus size={18}/>{t('Add', 'إضافة')}</Button>
       <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline"><MoreHorizontal size={18}/>{t('More', 'المزيد')}</Button></DropdownMenuTrigger><DropdownMenuContent className="workshop-menu" align="center" collisionPadding={12}>
