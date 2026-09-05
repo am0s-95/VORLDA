@@ -30,7 +30,7 @@ export async function resourceApi(request:Request,env:Env,user:User):Promise<Res
         const validated=validateData(kind,b.data),name=cleanName(b.name,100),time=now();
         if(prior && (!Number.isInteger(b.revision)||b.revision!==prior.revision))throw new ApiError(409,'This resource changed or its revision is missing. Reload before editing.');
         if(!prior){const count=await db(env).prepare('SELECT COUNT(*) AS n FROM studio_resources WHERE owner=? AND kind=?').bind(user.id,kind).first<any>();if(count.n>=limit)throw new ApiError(409,'Your plan resource limit has been reached.');}
-        const resourceId=key||id(),data=await storeJson(env,'resources/'+resourceId,validated);
+        const resourceId=key||id(),data=await storeJson(env,'resources/'+resourceId,validated,false,prior?undefined:user.id);
         if(prior){if(!Number.isInteger(b.revision))throw new ApiError(400,'A resource revision is required.');const r=await db(env).prepare('UPDATE studio_resources SET name=?,data=?,revision=revision+1,updated_at=? WHERE id=? AND owner=? AND revision=?').bind(name,data,time,key,user.id,b.revision).run();if(!r.meta.changes)throw new ApiError(409,'This resource changed. Reload before editing.');return json({saved:true});}
         const newId=resourceId,r=await db(env).prepare('INSERT INTO studio_resources(id,owner,kind,name,data,revision,created_at,updated_at) SELECT ?,?,?,?,?,1,?,? WHERE (SELECT COUNT(*) FROM studio_resources WHERE owner=? AND kind=?)<?').bind(newId,user.id,kind,name,data,time,time,user.id,kind,limit).run();
         if(!r.meta.changes)throw new ApiError(409,'Your plan resource limit has been reached.');return json({id:newId},201);

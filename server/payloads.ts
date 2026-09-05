@@ -1,6 +1,7 @@
-import { ApiError, type Env } from './db.ts';
+import { ApiError, db, now, type Env } from './db.ts';
 
-const PREFIX = 'vorlda-r2-json:v1:';
+import { reserveStorage,releaseStorage } from './entitlements.ts';
+import { PAYLOAD_PREFIX as PREFIX } from './storage-accounting.ts';
 export const INLINE_JSON_BYTES = 128_000;
 const MAX_JSON_BYTES = 8_000_000;
 const encoder = new TextEncoder();
@@ -12,13 +13,31 @@ function scopePath(scope: string) {
 // Immutable object first, then a small pointer in the existing atomic D1 write.
 // Old inline JSON remains readable. Never delete on a failed/ambiguous CAS:
 // snapshots, publications or a committed transaction can still reference it.
-export async function storeJson(env: Env, scope: string, value: unknown, force = false): Promise<string> {
+export async function storeJson(env: Env, scope: string, value: unknown, _force = false, newOwner?: string): Promise<string> {
     const prefix = scopePath(scope), raw = JSON.stringify(value), bytes = encoder.encode(raw);
     if (bytes.byteLength > MAX_JSON_BYTES) throw new ApiError(413,'This project payload exceeds the storage budget.');
-    if (!force && bytes.byteLength <= INLINE_JSON_BYTES) return raw;
-    const checksum = await hash(bytes), key = prefix+crypto.randomUUID()+'.json';
+    const [kind,scopeId]=scope.split('/');
+    const existingOwner=await db(env).prepare(`SELECT owner FROM ${kind==='projects'?'projects':'studio_resources'} WHERE id=?`).bind(scopeId).first<{owner:string}>();
+    const owner=existingOwner?.owner||newOwner;
+    if(!owner)throw new ApiError(500,'A storage owner is required.');
+    const checksum=await hash(bytes);
+    const existing=await db(env).prepare('SELECT object_key,bytes FROM payload_objects WHERE owner=? AND scope=? AND sha256=? LIMIT 1').bind(owner,scope,checksum).first<any>();
+    if(existing){const reference=PREFIX+JSON.stringify({key:existing.object_key,bytes:existing.bytes,sha256:checksum});try{await loadJson(env,scope,reference);return reference;}catch{/* Repair by writing a fresh object; retain historical accounting for review. */}}
+    const key=prefix+crypto.randomUUID()+'.json',reservation=await reserveStorage(env,owner,scopeId,bytes.byteLength);
     try { await env.BUCKET.put(key,bytes,{httpMetadata:{contentType:'application/json'}}); }
-    catch { throw new ApiError(503,'Project storage is unavailable. Your current saved version was not replaced.'); }
+    catch {
+        // A rejected PUT may still have reached storage. Delete our unique unreferenced key
+        // before releasing its quota. If deletion fails, keep the reservation for review.
+        try { await env.BUCKET.delete(key);await releaseStorage(env,reservation); } catch {}
+        throw new ApiError(503,'Project storage is unavailable. Your current saved version was not replaced.');
+    }
+    await db(env).batch([
+        db(env).prepare('INSERT INTO payload_objects(object_key,owner,scope,bytes,sha256,created_at) VALUES(?,?,?,?,?,?)').bind(key,owner,scope,bytes.byteLength,checksum,now()),
+        db(env).prepare('DELETE FROM resource_reservations WHERE id=?').bind(reservation)
+    ]);
+    // All new JSON uses immutable objects, including small drafts. A failed CAS keeps
+    // its object accounted; snapshots and publications can share it without double charging.
+
     return PREFIX+JSON.stringify({key,bytes:bytes.byteLength,sha256:checksum});
 }
 export async function loadJson<T = any>(env: Env, scope: string, stored: string): Promise<T> {
@@ -41,4 +60,12 @@ export async function loadJson<T = any>(env: Env, scope: string, stored: string)
 export async function copyJson(env: Env, scope: string, stored: string): Promise<string> {
     const value=await loadJson(env,scope,stored);
     return stored.startsWith(PREFIX) ? stored : storeJson(env,scope,value);
+}
+
+// Only for a creation attempt whose transaction has returned a definite non-commit.
+// Never use this for an ambiguous database response or for an existing project CAS.
+export async function discardUncommittedProject(env:Env,owner:string,projectId:string){
+    if(await db(env).prepare('SELECT id FROM projects WHERE id=?').bind(projectId).first())return;
+    const objects=await db(env).prepare('SELECT object_key FROM payload_objects WHERE owner=? AND scope=?').bind(owner,'projects/'+projectId).all<{object_key:string}>();
+    for(const object of objects.results){await env.BUCKET.delete(object.object_key);await db(env).prepare('DELETE FROM payload_objects WHERE object_key=? AND owner=?').bind(object.object_key,owner).run();}
 }

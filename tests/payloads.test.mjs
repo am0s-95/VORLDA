@@ -23,7 +23,7 @@ test('object PUT failure and stale draft never replace saved graph or increment 
  const f=fixture();try{const p=(await client(f,'/api/projects','POST',{name:'Safe',kind:'blank'})).body;
  f.env.BUCKET.put=async()=>{throw Error('injected outage')};
  assert.equal((await client(f,'/api/projects/'+p.id,'PATCH',{draft:bigGraph(),revision:0,draftRevision:0})).status,503);
- let row=f.sqlite.prepare('SELECT * FROM projects WHERE id=?').get(p.id);assert.equal(row.draft_revision,0);assert.equal(JSON.parse(row.draft).pieces.length,0);
+ let row=f.sqlite.prepare('SELECT * FROM projects WHERE id=?').get(p.id);assert.equal(row.draft_revision,0);assert.equal((await loadJson(f.env,'projects/'+p.id,row.draft)).pieces.length,0);
  assert.equal((await client(f,'/api/projects/'+p.id,'PATCH',{draft:bigGraph(),revision:0,draftRevision:2})).status,409);
  }finally{f.close();}
 });
@@ -38,7 +38,7 @@ test('legacy large inline quote is converted before atomic apply; rollback keeps
  }finally{f.close();}
 });
 test('payload references reject scope substitution, missing files and corrupt bytes',async()=>{
- const f=fixture();try{const scope='projects/test',value={text:'x'.repeat(150000)},ref=await storeJson(f.env,scope,value);
+ const f=fixture();try{const scope='projects/test',value={text:'x'.repeat(150000)},ref=await storeJson(f.env,scope,value,false,'owner-id');
  assert.deepEqual(await loadJson(f.env,scope,ref),value);assert.equal(await copyJson(f.env,scope,ref),ref);
  await assert.rejects(()=>loadJson(f.env,'projects/other',ref),/reference/);
  const key=[...f.files.keys()][0],file=f.files.get(key);const bytes=new Uint8Array(file.bytes);bytes[30]^=1;file.bytes=bytes.buffer;

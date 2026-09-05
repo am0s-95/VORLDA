@@ -8,6 +8,8 @@ import { compileHTML } from '../lib/compiler.ts';
 import { draftPlans, PLAN_IDS, testTariffs, type Plan, type Tariffs } from '../lib/money.ts';
 import { entitlement, storageUsage, reserveStorage, releaseStorage, requireStudio } from './entitlements.ts';
 import { productionApi, productionReady, productionCallback } from './production.ts';
+import { rateLimit, boundedFormData } from './limits.ts';
+import { commerceApi } from './commerce.ts';
 import { resourceApi } from './resources.ts';
 import { isTier } from '../lib/plans.ts';
 import { storeJson, loadJson, copyJson } from './payloads.ts';
@@ -46,6 +48,9 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
         if(callback) return callback;
         csrf(request);
         const user = await authenticate(request, env), method = request.method;
+        await rateLimit(env,user.id,['GET','HEAD'].includes(method)?'read':'write');
+        const commerceResponse=await commerceApi(request,env,user);
+        if(commerceResponse)return commerceResponse;
         const resourceResponse = await resourceApi(request,env,user);
         if(resourceResponse) return resourceResponse;
         const productionResponse = await productionApi(request,env,user);
@@ -82,8 +87,8 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
         if (path === '/api/projects' && method === 'POST') {
             noToken(user);
             const b = await body(request), projectId = id(), name = cleanName(b.name || 'Untitled assembly'), draft = b.graph ? graph(b.graph) : createAssembly(b.kind || 'blank'), time = now();
-            const storedDraft=await storeJson(env,'projects/'+projectId,draft);
-            await db(env).prepare('INSERT INTO projects(id,owner,name,graph,draft,revision,created_at,updated_at) VALUES(?,?,?,?,?,0,?,?)').bind(projectId, user.id, name, JSON.stringify(emptyGraph()), storedDraft, time, time).run();
+            const storedDraft=await storeJson(env,'projects/'+projectId,draft,false,user.id),storedGraph=await storeJson(env,'projects/'+projectId,emptyGraph(),false,user.id);
+            await db(env).prepare('INSERT INTO projects(id,owner,name,graph,draft,revision,created_at,updated_at) VALUES(?,?,?,?,?,0,?,?)').bind(projectId, user.id, name, storedGraph, storedDraft, time, time).run();
             return json(await projectPayload(env, await projectAccess(env, user, projectId)), 201);
         }
         if (path === '/api/quotes/apply' && method === 'POST') {
@@ -200,7 +205,7 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                 if (p.role !== 'owner' || p.revision !== 0 || (await loadJson(env,'projects/'+p.id,p.graph)).pieces.length)
                     throw new ApiError(409, 'Import into a new, empty project to preserve existing work.');
                 const b = await body(request), imported = await storeJson(env,'projects/'+p.id,graph(b.graph),true), stamp = now(), snapshotId = id();
-                const result = await db(env).batch([db(env).prepare('UPDATE projects SET graph=?,draft=?,revision=1,draft_revision=draft_revision+1,updated_at=? WHERE id=? AND revision=0 AND draft_revision=?').bind(imported, imported, stamp, p.id, p.draft_revision), db(env).prepare('INSERT INTO snapshots(id,project_id,graph,label,revision,actor,created_at) SELECT ?,id,graph,?,revision,?,? FROM projects WHERE id=? AND revision=1 AND graph=?').bind(snapshotId, 'Imported original project', user.id, stamp, p.id, imported)]);
+                const result = await db(env).batch([db(env).prepare('INSERT INTO snapshots(id,project_id,graph,label,revision,actor,created_at) SELECT ?,id,?, ?,1,?,? FROM projects WHERE id=? AND revision=0 AND draft_revision=?').bind(snapshotId,imported,'Imported original project',user.id,stamp,p.id,p.draft_revision),db(env).prepare('UPDATE projects SET graph=?,draft=?,revision=1,draft_revision=draft_revision+1,updated_at=? WHERE id=? AND revision=0 AND draft_revision=?').bind(imported,imported,stamp,p.id,p.draft_revision)]);
                 if (!result[0].meta.changes)
                     throw new ApiError(409, 'The project changed during import.');
                 return json({ imported: true, revision: 1 });
@@ -246,7 +251,8 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
             if (action === 'assets' && method === 'POST') {
                 if (Number(request.headers.get('content-length')) > 26500000)
                     throw new ApiError(413, 'The upload limit is 25 MB.');
-                const f = await request.formData(), file = f.get('file');
+                await rateLimit(env,user.id,'upload');
+                const f = await boundedFormData(request,26500000), file = f.get('file');
                 if (!(file instanceof File) || file.size > 25 * 1024 * 1024 || !file.size)
                     throw new ApiError(400, 'Choose a file up to 25 MB.');
                 const types = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'video/mp4', 'video/webm', 'audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-wav', 'audio/ogg', 'audio/webm', 'audio/flac', 'text/csv', 'application/json', 'application/pdf'];
@@ -327,8 +333,11 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
         throw new ApiError(404, 'This endpoint does not exist.');
     }
     catch (e) {
-        if (e instanceof ApiError)
-            return json({ error: e.message }, e.status);
+        if (e instanceof ApiError) {
+            const response=json({ error: e.message }, e.status);
+            if(e.status===429)response.headers.set('Retry-After','60');
+            return response;
+        }
         console.error('VORLDA request failed', new URL(request.url).pathname, e instanceof Error ? e.name : 'UnknownError');
         return json({ error: 'The request could not be completed. Your changes remain in the draft. Try again.' }, 500);
     }
