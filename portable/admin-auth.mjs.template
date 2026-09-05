@@ -1,0 +1,106 @@
+import {randomBytes,createHash,scrypt,timingSafeEqual} from 'node:crypto';
+import {promisify} from 'node:util';
+const derive=promisify(scrypt),N=131072,r=8,p=1;
+const token=()=>randomBytes(32).toString('base64url');
+const digest=value=>createHash('sha256').update(value).digest('hex');
+const fail=(status,message)=>Object.assign(Error(message),{status});
+export function adminSchema(db){
+ db.exec(`CREATE TABLE IF NOT EXISTS admin_account(id INTEGER PRIMARY KEY CHECK(id=1),username TEXT NOT NULL,verifier TEXT NOT NULL,version INTEGER NOT NULL,must_change INTEGER NOT NULL,temporary_expires INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS admin_sessions(hash TEXT PRIMARY KEY,csrf TEXT NOT NULL,scope TEXT NOT NULL,version INTEGER NOT NULL,expires INTEGER NOT NULL,idle_expires INTEGER NOT NULL,subject TEXT NOT NULL);
+ CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry ON admin_sessions(expires);
+ CREATE TABLE IF NOT EXISTS admin_limits(subject TEXT NOT NULL,window INTEGER NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(subject,window));
+ CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY,event TEXT NOT NULL,created_at INTEGER NOT NULL);`);
+}
+export function passwordPolicy(value){
+ if(typeof value!=='string'||[...value].length<15||[...value].length>128||Buffer.byteLength(value)>1024)throw fail(400,'Use a passphrase of 15–128 characters. It is never trimmed or truncated.');
+ if(/^(.)\1+$/.test(value)||['passwordpassword','123456789012345','1234567890123456','qwertyuiopasdfgh'].includes(value.toLowerCase()))throw fail(400,'Choose a less predictable passphrase.');
+}
+export async function hashPassword(password){passwordPolicy(password);const salt=randomBytes(16).toString('hex'),key=await derive(password,salt,32,{N,r,p,maxmem:256*1024*1024});return JSON.stringify({v:1,N,r,p,salt,hash:key.toString('hex')});}
+export async function verifyPassword(password,stored){
+ if(typeof password!=='string'||Buffer.byteLength(password)>1024)return false;
+ const parsed=JSON.parse(stored);
+ if(parsed.v!==1||parsed.N!==N||parsed.r!==r||parsed.p!==p||!/^[a-f0-9]{32}$/.test(parsed.salt)||!/^[a-f0-9]{64}$/.test(parsed.hash))throw fail(503,'Credential storage is invalid. Use operator recovery.');
+ const key=await derive(password,parsed.salt,32,{N,r,p,maxmem:256*1024*1024});return timingSafeEqual(key,Buffer.from(parsed.hash,'hex'));
+}
+function transaction(db,fn){db.exec('BEGIN IMMEDIATE');try{const result=fn();db.exec('COMMIT');return result;}catch(e){db.exec('ROLLBACK');throw e;}}
+export async function initializeAdmin(db,reset=false){
+ adminSchema(db);const old=db.prepare('SELECT * FROM admin_account WHERE id=1').get();
+ if(old&&!reset)throw Error('An administrator already exists. Initialization never overwrites an account.');
+ if(!old&&reset)throw Error('No administrator exists. Use admin:init.');
+ const temporaryPassword=randomBytes(24).toString('base64url'),verifier=await hashPassword(temporaryPassword),expires=Date.now()+3600000;
+ transaction(db,()=>{
+  const current=db.prepare('SELECT version FROM admin_account WHERE id=1').get();
+  if((current?.version??0)!==(old?.version??0))throw Error('Account changed. Retry the explicit operator action.');
+  db.prepare('INSERT INTO admin_account(id,username,verifier,version,must_change,temporary_expires) VALUES(1,?,?,1,1,?) ON CONFLICT(id) DO UPDATE SET verifier=excluded.verifier,version=admin_account.version+1,must_change=1,temporary_expires=excluded.temporary_expires').run('admin',verifier,expires);
+  db.prepare('DELETE FROM admin_sessions').run();
+  db.prepare('INSERT INTO admin_audit(event,created_at) VALUES(?,?)').run(reset?'operator_reset':'operator_initialize',Date.now());
+ });
+ return {username:'admin',temporaryPassword,expiresAt:new Date(expires).toISOString()};
+}
+export function createAdminService({db,profile,instanceId,publicMode,getOrigin,html,script}){
+ adminSchema(db);let working=false;
+ const cookieName=(publicMode?'__Host-vorlda-admin-':'vorlda-dev-admin-')+instanceId.replaceAll('-','').slice(0,12);
+ const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"};
+ const account=()=>db.prepare('SELECT * FROM admin_account WHERE id=1').get();
+ function cookie(value,age){return `${cookieName}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${publicMode?'; Secure':''}`;}
+ function limit(subject,maximum){const window=Math.floor(Date.now()/60000);db.prepare('DELETE FROM admin_limits WHERE window<?').run(window-2);const row=db.prepare('INSERT INTO admin_limits(subject,window,count) VALUES(?,?,1) ON CONFLICT(subject,window) DO UPDATE SET count=count+1 RETURNING count').get(subject,window);if(row.count>maximum)throw fail(429,'Too many attempts. Wait a minute before trying again.');}
+ function readSession(req){const values=(req.headers.cookie||'').split(';').map(x=>x.trim()).filter(x=>x.startsWith(cookieName+'='));if(values.length!==1)return null;const raw=values[0].slice(cookieName.length+1);if(!/^[\w-]{43}$/.test(raw))return null;
+  const found=db.prepare('SELECT * FROM admin_sessions WHERE hash=? AND expires>? AND idle_expires>?').get(digest(raw),Date.now(),Date.now());if(!found)return null;
+  const a=account();if(found.scope!=='preauth'&&(!a||found.version!==a.version||found.scope==='admin'&&a.must_change||found.scope==='bootstrap'&&a.temporary_expires<=Date.now()))return null;
+  return found;
+ }
+ function issue(scope,version,subject){const raw=token(),csrf=token(),time=Date.now(),duration=scope==='admin'?8*3600000:5*60000;
+  db.prepare('DELETE FROM admin_sessions WHERE expires<=? OR idle_expires<=?').run(time,time);
+  if(db.prepare('SELECT count(*) AS n FROM admin_sessions').get().n>=512)throw fail(503,'Session capacity reached. Try again later.');
+  db.prepare('INSERT INTO admin_sessions(hash,csrf,scope,version,expires,idle_expires,subject) VALUES(?,?,?,?,?,?,?)').run(digest(raw),csrf,scope,version,time+duration,time+Math.min(duration,20*60000),subject);
+  return {raw,csrf,scope,cookie:cookie(raw,duration/1000)};
+ }
+ async function passwordWork(fn){if(working)throw fail(503,'A sign-in check is already running. Try again shortly.');working=true;try{return await fn();}finally{working=false;}}
+ const status=session=>({scope:session.scope,csrf:session.csrf,profile,username:session.scope==='preauth'?undefined:'admin',initialized:!!account()});
+ return {async handle(req,res,path,readBody){
+  const send=(code,data,extra={})=>{res.writeHead(code,{...headers,'Content-Type':'application/json',...extra});res.end(JSON.stringify(data));};
+  const subject=digest(req.socket.remoteAddress||'unknown');
+  if(req.method==='GET'&&path==='/admin'){res.writeHead(200,{...headers,'Content-Type':'text/html; charset=utf-8'});res.end(html);return;}
+  if(req.method==='GET'&&path==='/admin/app.js'){res.writeHead(200,{...headers,'Content-Type':'text/javascript; charset=utf-8'});res.end(script);return;}
+  let session=readSession(req);
+  if(req.method==='GET'&&path==='/admin/api/session'){
+   if(req.headers['sec-fetch-site']==='cross-site')throw fail(403,'Cross-site session requests are not allowed.');
+   if(!session){limit('session:'+subject,20);const created=issue('preauth',0,subject);send(200,status(created),{'Set-Cookie':created.cookie});return;}
+   send(200,status(session));return;
+  }
+  if(!session)throw fail(401,'Sign in to continue.');
+  if(req.method==='POST'){
+   if(req.headers.origin!==getOrigin()||req.headers['x-csrf-token']!==session.csrf)throw fail(403,'Invalid request origin or CSRF token.');
+   if((req.headers['content-type']||'').split(';')[0]!=='application/json')throw fail(415,'JSON required.');
+  }
+  if(req.method==='POST'&&path==='/admin/api/login'){
+   if(session.scope!=='preauth')throw fail(409,'Sign out before signing in again.');limit('login:'+subject,8);limit('login:account',20);
+   const b=await readBody(6000),a=account();if(!a)throw fail(409,'The operator must run admin:init first.');
+   await passwordWork(async()=>{
+    const valid=await verifyPassword(b.password,a.verifier);
+    if(!valid||b.username!==a.username||a.must_change&&a.temporary_expires<=Date.now())throw fail(401,'Invalid or expired credentials.');
+    const created=transaction(db,()=>{const latest=account();if(latest.version!==a.version||!readSession(req))throw fail(409,'Credentials changed. Sign in again.');db.prepare('DELETE FROM admin_sessions WHERE hash=?').run(session.hash);const next=issue(a.must_change?'bootstrap':'admin',a.version,subject);db.prepare('INSERT INTO admin_audit(event,created_at) VALUES(?,?)').run('login',Date.now());return next;});
+    send(200,status(created),{'Set-Cookie':created.cookie});
+   });return;
+  }
+  if(req.method==='POST'&&path==='/admin/api/logout'){
+   db.prepare('DELETE FROM admin_sessions WHERE hash=?').run(session.hash);send(200,{signedOut:true},{'Set-Cookie':cookie('',0)});return;
+  }
+  if(req.method==='POST'&&path==='/admin/api/password'){
+   if(!['bootstrap','admin'].includes(session.scope))throw fail(403,'Sign in before changing the password.');limit('password:'+subject,6);
+   const b=await readBody(6000);passwordPolicy(b.newPassword);if(b.newPassword===b.currentPassword)throw fail(400,'Choose a new password.');const a=account();
+   await passwordWork(async()=>{
+    if(!await verifyPassword(b.currentPassword,a.verifier))throw fail(401,'Current password is incorrect.');const verifier=await hashPassword(b.newPassword);
+    const created=transaction(db,()=>{if(!readSession(req)||account().version!==a.version)throw fail(409,'Credentials changed. Sign in again.');db.prepare('UPDATE admin_account SET verifier=?,version=version+1,must_change=0,temporary_expires=0 WHERE id=1').run(verifier);db.prepare('DELETE FROM admin_sessions').run();const next=issue('admin',a.version+1,subject);db.prepare('INSERT INTO admin_audit(event,created_at) VALUES(?,?)').run('password_changed',Date.now());return next;});
+    send(200,status(created),{'Set-Cookie':created.cookie});
+   });return;
+  }
+  if(session.scope!=='admin')throw fail(403,'Change the temporary password before opening administration.');
+  db.prepare('UPDATE admin_sessions SET idle_expires=? WHERE hash=?').run(Math.min(session.expires,Date.now()+20*60000),session.hash);
+  if(req.method==='GET'&&path==='/admin/api/responses'){
+   const after=Number(new URL(req.url,getOrigin()).searchParams.get('after')||0);if(!Number.isSafeInteger(after)||after<0)throw fail(400,'Invalid page cursor.');
+   const rows=db.prepare('SELECT rowid AS cursor,id,piece_id,data,created_at FROM submissions WHERE rowid>? ORDER BY rowid LIMIT 101').all(after),more=rows.length>100,items=rows.slice(0,100).map(x=>({...x,data:JSON.parse(x.data)}));send(200,{items,next:more?items.at(-1).cursor:null});return;
+  }
+  throw fail(404,'Not found.');
+ }};
+}

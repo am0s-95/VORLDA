@@ -1,7 +1,7 @@
 import {validateGraph,type Graph} from './world.ts';
 export const BUNDLE_ASSET_BYTES=16*1024*1024;
 export type EmbeddedAsset={path:string;name:string;type:string;data:string};
-export type ProjectBundle={format:'vorlda-project';version:1;name:string;graph:Graph;assets:EmbeddedAsset[];revision?:number;entry?:string};
+export type ProjectBundle={format:'vorlda-project';version:1;name:string;graph:Graph;assets:EmbeddedAsset[];revision?:number;entry?:string;runtime?:{admin:boolean}};
 export function validateProjectBundle(value:unknown):ProjectBundle{
  if(!value||typeof value!=='object')throw Error('Invalid project file.');
  const v=value as Record<string,any>;
@@ -17,5 +17,7 @@ export function validateProjectBundle(value:unknown):ProjectBundle{
   if(total>BUNDLE_ASSET_BYTES)throw Error('This browser export/import supports up to 16 MiB of embedded assets. Split large media projects first.');
  }
  if(v.entry!==undefined&&!graph.pieces.some(p=>p.id===v.entry&&p.type==='page'&&!p.hidden))throw Error('Invalid entry page.');
- return {format:'vorlda-project',version:1,name:String(v.name||'VORLDA app').slice(0,160),graph,assets,revision:Number.isSafeInteger(v.revision)?v.revision:undefined,entry:v.entry};
+ if(v.runtime!==undefined&&(!v.runtime||typeof v.runtime!=='object'||typeof v.runtime.admin!=='boolean'))throw Error('Invalid runtime capabilities.');
+ // Only non-secret capability metadata crosses the source/import boundary.
+ return {format:'vorlda-project',version:1,name:String(v.name||'VORLDA app').slice(0,160),graph,assets,revision:Number.isSafeInteger(v.revision)?v.revision:undefined,entry:v.entry,...(v.runtime?{runtime:{admin:v.runtime.admin}}:{})};
 }
