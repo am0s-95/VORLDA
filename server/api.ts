@@ -3,7 +3,7 @@ import { authenticate, projectAccess, requireAdmin, csrf, digest, type User } fr
 import { getWallet, quoteGraph, applyQuote, grantFunds } from './wallet.ts';
 import { checkout, portal, webhook } from './payments.ts';
 import { id, emptyGraph, createAssembly, validateGraph, checkPublish, type Graph } from '../lib/world.ts';
-import { validateFormResponse } from '../lib/forms.ts';
+import { validateFormResponse, validateAllForms } from '../lib/forms.ts';
 import { compileHTML } from '../lib/compiler.ts';
 import { draftPlans, PLAN_IDS, testTariffs, type Plan, type Tariffs } from '../lib/money.ts';
 import { entitlement, storageUsage, reserveStorage, releaseStorage, requireStudio } from './entitlements.ts';
@@ -154,7 +154,7 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                 const b = await body(request, 50000), form = g.pieces.find(p => p.id === b.pieceId && p.type === 'form');
                 if (!form)
                     throw new ApiError(400, 'Form not found.');
-                let data:Record<string,string>;try{data=validateFormResponse(g,form.id,b.data);}catch(e){throw new ApiError(400,(e as Error).message);}
+                let data:Record<string,string>;try{data=validateFormResponse(g,form.id,b.data,b.device);}catch(e){throw new ApiError(400,(e as Error).message);}
                 const requestId = identifier(b.requestId),submissionId=await digest(pub.id + ':' + user.id + ':' + requestId),serialized=JSON.stringify(data);
                 await db(env).prepare('INSERT INTO submissions(id,project_id,publication_id,piece_id,data,actor,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING').bind(submissionId, pub.project_id, pub.id, form.id, serialized, user.id, now()).run();
                 const saved=await db(env).prepare('SELECT piece_id,data FROM submissions WHERE id=?').bind(submissionId).first<any>();
@@ -224,6 +224,7 @@ export async function handleApi(request: Request, env: Env, ctx: Context): Promi
                 const policy=await db(env).prepare('SELECT require_review FROM project_policies WHERE project_id=?').bind(p.id).first<any>();
                 if(policy?.require_review){const e=await entitlement(env,p.owner);if(e.tier!=='studio')throw new ApiError(403,'Renew Studio or ask the owner to review the publication policy.');const review=await db(env).prepare("SELECT id FROM publication_reviews WHERE project_id=? AND revision=? AND decision='approved' AND (author=? OR author IN (SELECT u.id FROM users u JOIN members m ON m.email=u.email WHERE m.project_id=? AND m.role='reviewer')) AND NOT EXISTS(SELECT 1 FROM publication_reviews WHERE project_id=? AND revision=? AND decision='changes_requested') LIMIT 1").bind(p.id,p.revision,p.owner,p.id,p.id,p.revision).first();if(!review)throw new ApiError(409,'This revision needs approval before publishing.');}
                 const g = graph(await loadJson(env,'projects/'+p.id,p.graph)), issues = checkPublish(g);
+                try { validateAllForms(g); } catch(e) { throw new ApiError(400,(e as Error).message); }
                 if (issues.some(i => i.severity === 'error'))
                     return json({ error: 'Resolve the publication checks first.', issues }, 409);
                 const key = id();

@@ -210,3 +210,7 @@ body{font-size:16px}.topbar{background:#131b2a;height:72px}.workbench{height:cal
  .workspace-status:has([data-save-state=error])>svg,.workspace-status:has([data-save-state=error])>span:first-of-type{display:none}
  .insertion-context .choice{min-height:44px;font-size:16px}
 }
+.outside-parts>p{font-size:14px;line-height:1.8;color:#d7c9b8;margin-top:8px}
+.outside-part{display:grid;gap:9px;margin-top:14px;padding-top:14px;border-top:1px solid #ffffff20;min-width:0}
+.outside-part>strong{font-size:15px;overflow-wrap:anywhere}.outside-part .choice{width:100%;min-height:44px}.outside-part .row{flex-wrap:wrap}.outside-part .row>button{min-height:44px}.outside-part>p{font-size:14px;line-height:1.6}
+@media(max-width:767px){.outside-part .row>button{flex:1;white-space:normal}}

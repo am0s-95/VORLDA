@@ -28,17 +28,29 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, width: number, li
     ctx.fillText(row, 0, y);
     y += lineHeight;
 } }
-export async function loadSceneMedia(g: Graph) { const map = new Map<string, Media>(); await Promise.all(g.pieces.filter(p => ['image', 'video', 'audio', 'character'].includes(p.type)).map(async (p) => { const source = safeMedia(p.type === 'character' ? (p.props.references as string[])?.[0] : p.props.src); if (!source)
-    return; const el = p.type === 'image' || p.type === 'character' ? new Image() : document.createElement(p.type === 'audio' ? 'audio' : 'video'); el.crossOrigin = 'anonymous'; if (el instanceof HTMLMediaElement) {
-    el.preload = 'auto';
-    el.setAttribute('playsinline', '');
-} await new Promise<void>((resolve, reject) => { const timer = setTimeout(() => reject(Error(`Timed out loading ${p.name}.`)), 20000); el.addEventListener(el instanceof HTMLImageElement ? 'load' : 'loadeddata', () => { clearTimeout(timer); resolve(); }, { once: true }); el.addEventListener('error', () => { clearTimeout(timer); reject(Error(`Could not load ${p.name}. Re-import external media to export it.`)); }, { once: true }); el.src = source; }); map.set(p.id, el); })); return map; }
+export function sceneMediaParts(g: Graph, scene?: Piece) {
+    const visible: Piece[] = [];
+    function visit(raw: Piece) { const p = effectivePiece(g,raw); if(p.hidden) return; if(['image','video','audio','character'].includes(p.type)) visible.push(p); for(const child of children(g,p.id)) if(child.type !== 'page') visit(child); }
+    if(scene) { for(const child of children(g,scene.id)) if(child.type !== 'page') visit(child); }
+    else for(const root of children(g,null)) visit(root);
+    return visible;
+}
+export async function loadSceneMedia(g: Graph, scene?: Piece) {
+    const map = new Map<string, Media>();
+    try { await Promise.all(sceneMediaParts(g,scene).map(async (p) => { const source = safeMedia(p.type === 'character' ? (p.props.references as string[])?.[0] : p.props.src); if (!source) return;
+        const el = p.type === 'image' || p.type === 'character' ? new Image() : document.createElement(p.type === 'audio' ? 'audio' : 'video');
+        map.set(p.id,el); el.crossOrigin = 'anonymous';
+        if(el instanceof HTMLMediaElement){el.preload='auto';el.setAttribute('playsinline','');}
+        await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>reject(Error(`Timed out loading ${p.name}.`)),20000);el.addEventListener(el instanceof HTMLImageElement?'load':'loadeddata',()=>{clearTimeout(timer);resolve();},{once:true});el.addEventListener('error',()=>{clearTimeout(timer);reject(Error(`Could not load ${p.name}. Re-import external media to export it.`));},{once:true});el.src=source;});
+    })); return map; } catch(error) { dispose(map); throw error; }
+}
 export function drawScene(ctx: CanvasRenderingContext2D, g: Graph, scene: Piece, media: Map<string, Media>, time = 0) {
+    scene = effectivePiece(g,scene);
     ctx.clearRect(0, 0, scene.w, scene.h);
     ctx.fillStyle = String(scene.style.background || '#ffffff');
     ctx.fillRect(0, 0, scene.w, scene.h);
-    function draw(raw: Piece) {
-        const p = effectivePiece(g, raw), x = p.props, s = p.style, start = Number(x.start) || 0, duration = Number(x.duration) || 8;
+    function draw(raw: Piece, position?: {x:number;y:number}) {
+        const p = {...effectivePiece(g, raw), ...position}, x = p.props, s = p.style, start = Number(x.start) || 0, duration = Number(x.duration) || 8;
         if (p.hidden || (['video', 'audio'].includes(p.type) && (time < start || time > start + duration)))
             return;
         const k = keyframeAt(x.keyframes, time - start);
@@ -56,7 +68,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, g: Graph, scene: Piece,
             ctx.ellipse(p.w / 2, p.h / 2, p.w / 2, p.h * .4, 0, 0, Math.PI * 2);
         else
             ctx.roundRect(0, 0, p.w, p.h, Math.max(0, Math.min(Number(s.radius) || 0, p.w / 2, p.h / 2)));
-        ctx.clip();
+        if(p.type !== 'group') ctx.clip();
         ctx.fillStyle = String(s.background || 'transparent');
         ctx.fillRect(0, 0, p.w, p.h);
         const el = media.get(p.id);
@@ -73,8 +85,8 @@ export function drawScene(ctx: CanvasRenderingContext2D, g: Graph, scene: Piece,
         }
         if (p.type === 'text' || p.type === 'button') {
             ctx.fillStyle = String(s.color || '#17201d');
-            const fs = Number(s.fontSize) || 24;
-            ctx.font = `${String(s.fontWeight || 400)} ${fs}px Arial`;
+            const fs = Number(s.fontSize) || 16;
+            ctx.font = `${String(s.fontWeight || 400)} ${fs}px ${String(s.fontFamily || 'Arial')}`;
             ctx.textBaseline = 'top';
             if (p.type === 'button') {
                 ctx.textAlign = 'center';
@@ -83,18 +95,27 @@ export function drawScene(ctx: CanvasRenderingContext2D, g: Graph, scene: Piece,
             else
                 wrapText(ctx, String(x.text || ''), p.w, fs * 1.25);
         }
-        for (const c of children(g, p.id))
-            draw(c);
+        drawChildren(p);
         ctx.restore();
     }
-    for (const p of children(g, scene.id))
-        draw(p);
+    function drawChildren(parent: Piece) {
+        const layout = parent.style.layout, flow = layout === 'row' || layout === 'column', padding = Number(parent.style.padding) || 0, gap = Number(parent.style.gap) || 0;
+        let offset = padding;
+        for (const raw of children(g,parent.id)) {
+            const p = effectivePiece(g,raw);
+            if(p.hidden || p.type === 'page') continue;
+            const position = flow ? {x:layout === 'row' ? offset : padding,y:layout === 'column' ? offset : padding} : undefined;
+            draw(raw,position);
+            if(flow) offset += (layout === 'row' ? p.w : p.h) + gap;
+        }
+    }
+    drawChildren(scene);
 }
 export async function exportStill(g: Graph, scene: Piece, time = 0) { if (scene.w * scene.h > 16777216)
-    throw Error('Reduce export dimensions to 16 megapixels or less.'); const media = await loadSceneMedia(g); try {
+    throw Error('Reduce export dimensions to 16 megapixels or less.'); const media = await loadSceneMedia(g,scene); try {
     for (const [key, el] of media) {
         if (el instanceof HTMLVideoElement) {
-            const p = g.pieces.find(p => p.id === key)!;
+            const p = effectivePiece(g,g.pieces.find(p => p.id === key)!);
             await seek(el, Math.max(0, Number(p.props.trim) || 0) + Math.max(0, time - (Number(p.props.start) || 0)) * (Number(p.props.speed) || 1));
         }
     }
@@ -120,7 +141,7 @@ function dispose(media: Map<string, Media>) { for (const el of media.values())
 export async function exportFilm(g: Graph, scene: Piece, duration: number, onProgress: (n: number) => void, signal: AbortSignal) { if (typeof MediaRecorder === 'undefined')
     throw Error('This browser cannot record video. Use a recent desktop browser.'); if (!Number.isFinite(duration) || duration <= 0 || duration > 180 || scene.w * scene.h > 4194304)
     throw Error('Use a duration up to 180 seconds and a frame of at most 4 megapixels for browser export.'); const audio = new AudioContext(); await audio.resume(); let media = new Map<string, Media>(); let recorder: MediaRecorder | undefined; try {
-    media = await loadSceneMedia(g);
+    media = await loadSceneMedia(g,scene);
     const canvas = document.createElement('canvas');
     canvas.width = scene.w;
     canvas.height = scene.h;
@@ -130,7 +151,7 @@ export async function exportFilm(g: Graph, scene: Piece, duration: number, onPro
             const source = audio.createMediaElementSource(el), gain = audio.createGain();
             source.connect(gain);
             gain.connect(mix);
-            const p = g.pieces.find(p => media.get(p.id) === el)!;
+            const p = effectivePiece(g,g.pieces.find(p => media.get(p.id) === el)!);
             gain.gain.value = Math.max(0, Math.min(1, Number(p.props.volume ?? 1)));
             el.playbackRate = Math.max(.25, Math.min(4, Number(p.props.speed) || 1));
             await seek(el, Number(p.props.trim) || 0);
@@ -153,7 +174,7 @@ export async function exportFilm(g: Graph, scene: Piece, duration: number, onPro
     } const t = (performance.now() - start) / 1000; for (const [key, el] of media) {
         if (!(el instanceof HTMLMediaElement))
             continue;
-        const p = g.pieces.find(p => p.id === key)!, from = Number(p.props.start) || 0, end = from + (Number(p.props.duration) || 8);
+        const p = effectivePiece(g,g.pieces.find(p => p.id === key)!), from = Number(p.props.start) || 0, end = from + (Number(p.props.duration) || 8);
         if (t >= from && t < end && !started.has(key)) {
             started.add(key);
             el.play().catch(() => { });

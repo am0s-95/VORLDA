@@ -35,7 +35,7 @@ const server=createServer({requestTimeout:15000,headersTimeout:10000,maxHeaderSi
   db.prepare('DELETE FROM limits WHERE window<?').run(window-1);
   const rate=db.prepare('INSERT INTO limits(ip,window,count) VALUES(?,?,1) ON CONFLICT(ip,window) DO UPDATE SET count=count+1 RETURNING count').get(ip,window);
   if(rate.count>20)throw fail(429,'Too many responses. Try again later.');
-  const b=await readBody();let data;try{if(!/^[-\w]{8,100}$/.test(b.requestId||''))throw Error('Invalid request ID.');data=JSON.stringify(validateFormResponse(project.graph,b.pieceId,b.data));}catch(e){throw fail(400,e.message);}
+  const b=await readBody();let data;try{if(!/^[-\w]{8,100}$/.test(b.requestId||''))throw Error('Invalid request ID.');data=JSON.stringify(validateFormResponse(project.graph,b.pieceId,b.data,b.device));}catch(e){throw fail(400,e.message);}
   const saved=db.prepare('SELECT piece_id,data FROM submissions WHERE id=?').get(b.requestId);
   if(saved){if(saved.piece_id!==b.pieceId||saved.data!==data)throw fail(409,'Request ID already used for a different response.');send(200,{saved:true});return;}
   db.prepare('INSERT INTO submissions(id,piece_id,data,created_at) VALUES(?,?,?,?)').run(b.requestId,b.pieceId,data,Date.now());

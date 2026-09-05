@@ -1,12 +1,12 @@
 import {compileHTML} from './compiler.ts';
 import {checkPublish} from './world.ts';
-import {formFields,formIsVisible} from './forms.ts';
+import {validateAllForms} from './forms.ts';
 import {validateProjectBundle} from './project-io.ts';
 export type PortableSources={world:string;compiler:string;forms:string;projectIo:string;build:string;server:string;responses:string;instance:string;adminAuth:string;adminOperator:string;adminHtml:string;adminScript:string};
 export function portableFiles(value:unknown,sources:PortableSources){
  const project=validateProjectBundle(value),errors=checkPublish(project.graph).filter(i=>i.severity==='error');
  if(errors.length)throw Error(errors.map(i=>i.message).join('\n'));
- for(const form of project.graph.pieces.filter(p=>p.type==='form'&&formIsVisible(project.graph,p.id)))formFields(project.graph,form.id);
+ validateAllForms(project.graph);
  const html=compileHTML(project.graph,{title:project.name,entry:project.entry,formEndpoint:'/api/forms',assetUrls:Object.fromEntries(project.assets.map(a=>[a.path,a.data]))});
  if(/\/api\/assets\/|blob:/.test(html))throw Error('An asset is missing from this bundle or still uses a temporary URL.');
  const files=[{name:'project.vorlda.json',content:JSON.stringify(project,null,2)},{name:'public/index.html',content:html},

@@ -275,7 +275,7 @@ export function validateGraph(input: unknown): Graph {
         throw Error('An entry point is missing.');
     return clone(g);
 }
-export function checkPublish(g: Graph): Issue[] { const issues: Issue[] = []; const pages = g.pieces.filter(p => p.type === 'page' && !p.hidden); if (!pages.length)
+export function checkPublish(g: Graph): Issue[] { const issues: Issue[] = []; const pages = g.pieces.filter(p => p.type === 'page' && (!effectivePiece(g,p).hidden || !effectivePiece(g,p,'mobile').hidden)); if (!pages.length)
     issues.push({ severity: 'error', code: 'NO_PAGE', message: 'Add an application page before publishing an application.' }); for (const c of g.connections) {
     const status = connectionStatus(g, c);
     if (status === 'pending' || status === 'broken')
@@ -284,9 +284,9 @@ export function checkPublish(g: Graph): Issue[] { const issues: Issue[] = []; co
     const p=effectivePiece(g,raw);
     if (p.type === 'button' && p.props.action === 'navigate' && !g.connections.some(c => c.from === p.id && !c.disabled))
         issues.push({ severity: 'warning', code: 'NO_ACTION', message: `${p.name} has no navigation action.`, target: p.id });
-    if (p.type === 'generator' && !p.hidden)
+    if (p.type === 'generator' && (!p.hidden || !effectivePiece(g,raw,'mobile').hidden))
         issues.push({ severity: 'error', code: 'NO_PROVIDER', message: `${p.name} needs a configured provider.`, target: p.id });
-    if (p.type === 'input' && p.props.inputType === 'password' && !p.hidden)
+    if (p.type === 'input' && p.props.inputType === 'password' && (!p.hidden || !effectivePiece(g,raw,'mobile').hidden))
         issues.push({ severity: 'error', code: 'AUTH_BACKEND_REQUIRED', message: `${p.name} requires an authentication backend. Generic form responses must not collect passwords.`, target: p.id });
     if (['image', 'video', 'audio'].includes(p.type) && !p.props.src)
         issues.push({ severity: 'warning', code: 'NO_ASSET', message: `${p.name} has no media.`, target: p.id });
