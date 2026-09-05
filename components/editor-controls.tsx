@@ -16,7 +16,7 @@ export function Choice({ value, onChange, options, label, className = '' }: {
     })[];
     label: string;
     className?: string;
-}) { return <Select value={value || '_none'} onValueChange={v => onChange(v === '_none' ? '' : v)}><SelectTrigger aria-label={label} className={'choice ' + className}><SelectValue placeholder={label}/></SelectTrigger><SelectContent>{options.map(v => { const item = typeof v === 'string' ? { value: v, label: v } : v; return <SelectItem value={item.value || '_none'} key={item.value}>{item.label}</SelectItem>; })}</SelectContent></Select>; }
+}) { return <Select value={value || '_none'} onValueChange={v => onChange(v === '_none' ? '' : v)}><SelectTrigger aria-label={label} className={'choice ' + className}><SelectValue placeholder={label}/></SelectTrigger><SelectContent position="popper" align="start" sideOffset={4} collisionPadding={12}>{options.map(v => { const item = typeof v === 'string' ? { value: v, label: v } : v; return <SelectItem value={item.value || '_none'} key={item.value}>{item.label}</SelectItem>; })}</SelectContent></Select>; }
 export function Field({ label, value, onChange, type = 'text', min, max, step, placeholder }: {
     label: string;
     value: unknown;

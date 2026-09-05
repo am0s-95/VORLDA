@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
@@ -26,7 +26,7 @@ export function Modal({ open, onClose, title, description, children, wide = fals
     description?: string;
     children: React.ReactNode;
     wide?: boolean;
-}) { return <Dialog open={open} onOpenChange={v => !v && onClose()}><DialogContent className={'workshop-modal ' + (wide ? 'wide' : '')}><DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description || 'VORLDA · Your creative workshop'}</DialogDescription></DialogHeader>{children}</DialogContent></Dialog>; }
+}) { const heading = useRef<HTMLHeadingElement>(null); return <Dialog open={open} onOpenChange={v => !v && onClose()}><DialogContent className={'workshop-modal ' + (wide ? 'wide' : '')} onOpenAutoFocus={e => { e.preventDefault(); heading.current?.focus({preventScroll:true}); }}><DialogHeader><DialogTitle ref={heading} tabIndex={-1}>{title}</DialogTitle><DialogDescription>{description || 'VORLDA'}</DialogDescription></DialogHeader>{children}</DialogContent></Dialog>; }
 export function WalletPanel({wallet,refresh,ar}:{wallet:any;refresh:()=>Promise<void>;ar:boolean}) {
  const [busy,setBusy]=useState(false),[amount,setAmount]=useState(25),t=(en:string,a:string)=>ar?a:en;
  const ent=wallet.entitlement||{tier:'wallet',name:'Wallet',storageBytes:1000000000},used=wallet.storageUsed||0;
