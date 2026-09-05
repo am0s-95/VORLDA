@@ -1,5 +1,5 @@
-import {DatabaseSync} from 'node:sqlite';
+import {openInstance} from './instance.mjs';
 // Local operator access only. No HTTP route exposes submissions or this file.
-const db=new DatabaseSync(new URL('./data/forms.sqlite',import.meta.url),{readOnly:true});
+const {db}=openInstance({mustExist:true});
 for(const row of db.prepare('SELECT * FROM submissions ORDER BY created_at').iterate())console.log(JSON.stringify({...row,data:JSON.parse(row.data)}));
 db.close();

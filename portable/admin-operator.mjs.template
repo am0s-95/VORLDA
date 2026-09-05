@@ -1,0 +1,7 @@
+import {project} from './build.mjs';
+import {openInstance} from './instance.mjs';
+import {initializeAdmin} from './admin-auth.mjs';
+if(!project.runtime?.admin)throw Error('This export does not enable the optional administrator console.');
+const action=process.argv[2];if(!['init','reset'].includes(action)||action==='reset'&&!process.argv.includes('--confirm-reset'))throw Error('Use admin:init, or admin:reset -- --confirm-reset. Reset revokes all administrator sessions.');
+const instance=openInstance();
+try{const credentials=await initializeAdmin(instance.db,action==='reset');console.log(JSON.stringify({profile:instance.profile,...credentials},null,2));console.error('Shown once. Deliver privately to the owner; never put these credentials into source, logs, email templates or project exports. Change the temporary password within one hour.');}finally{instance.db.close();}

@@ -12,8 +12,7 @@ import {validateFormResponse} from '../lib/forms.ts';
 import {validateProjectBundle} from '../lib/project-io.ts';
 import {portableFiles,portableManifest} from '../lib/portable.ts';
 import {zipFiles} from '../lib/zip.ts';
-const source=name=>readFileSync(new URL('../'+name,import.meta.url),'utf8');
-const sources={world:source('lib/world.ts'),compiler:source('lib/compiler.ts'),forms:source('lib/forms.ts'),projectIo:source('lib/project-io.ts'),...Object.fromEntries(['build','server','responses'].map(k=>[k,source('portable/'+k+'.mjs.template')]))};
+import {sources} from './portable-fixture.mjs';
 function example(){const g=emptyGraph(),page=makePiece('page'),form=makePiece('form',page.id),input=makePiece('input',form.id),image=makePiece('image',page.id);input.props={field:'email',inputType:'email',required:true};image.props.src='/api/assets/picture';g.pieces.push(page,form,input,image);g.entries=[page.id];return {format:'vorlda-project',version:1,name:'مشروعي',graph:g,entry:page.id,assets:[{path:'/api/assets/picture',name:'image.png',type:'image/png',data:'data:image/png;base64,iVBORw=='}]};}
 test('bundle and ZIP reject unsafe paths, malformed assets, versions and missing media',async()=>{
  for(const name of ['../x','/x','x\\y','C:/x','a//b','a/./b'])assert.throws(()=>zipFiles([{name,content:'x'}]),/path/);
@@ -51,7 +50,7 @@ test('actual ZIP extracts independently, builds with no dependencies and runs a 
   const post=(data=payload,origin=base)=>fetch(base+'/api/forms',{method:'POST',headers:{'content-type':'application/json',origin},body:JSON.stringify(data)});
   assert.equal((await post(payload,'https://attacker.test')).status,403);assert.equal((await post({...payload,data:{email:'bad'}})).status,400);
   assert.equal((await post()).status,201);assert.equal((await post()).status,200);assert.equal((await post({...payload,data:{email:'new@example.test'}})).status,409);
-  await service.stop();service=undefined;let db=new DatabaseSync(join(dir,'data/forms.sqlite'),{readOnly:true});assert.equal(db.prepare('SELECT count(*) AS n FROM submissions').get().n,1);db.close();
+  await service.stop();service=undefined;let db=new DatabaseSync(join(dir,'data/development/forms.sqlite'),{readOnly:true});assert.equal(db.prepare('SELECT count(*) AS n FROM submissions').get().n,1);db.close();
   service=await start(dir);base=service.origin;assert.equal((await post()).status,200);assert.equal((await post({...payload,requestId:'response-002'})).status,201);
   let last;for(let n=0;n<22;n++)last=await post({...payload,requestId:'flood-test-'+n});assert.equal(last.status,429);
  }finally{if(service)await service.stop();rmSync(dir,{recursive:true,force:true});}
