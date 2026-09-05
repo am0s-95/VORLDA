@@ -101,6 +101,6 @@ function PieceVisual({ p, time, playing }: {
     if (p.type === 'gallery')
         return <div className="gallery-piece" style={{ gridTemplateColumns: `repeat(${Number(x.columns) || 3},1fr)` }}>{((Array.isArray(x.images) && x.images.length ? x.images : [null, null, null]) as any[]).map((src, i) => src ? <img key={i} draggable={false} src={safeMedia(src)} alt="Gallery asset"/> : <div key={i}><ImageIcon size={24}/></div>)}</div>;
     if (p.type === 'code')
-        return <div className="code-piece"><Code2 size={24}/><strong>Custom HTML</strong><p>Isolated preview in the application player</p><pre>{String(x.html || '').slice(0, 200)}</pre></div>;
+        return <div className="code-piece"><Code2 size={24}/><strong>{x.workspace ? p.name : 'Custom HTML'}</strong><p>{x.workspace ? 'Source files · Programming workspace' : 'Isolated preview in the application player'}</p><pre>{x.workspace ? String((Array.isArray((x.workspace as any).files) ? (x.workspace as any).files.filter((f:any)=>f && typeof f.path === 'string').slice(0,6).map((f:any)=>f.path).join('\n') : '') || '') : String(x.html || '').slice(0, 200)}</pre></div>;
     return null;
 }

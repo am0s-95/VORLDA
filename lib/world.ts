@@ -306,7 +306,10 @@ export function duplicateParts(g: Graph, ids: string[], mode: 'independent' | 'l
         copy.name += ' copy';
     }
     const remap = (v: Json): Json => typeof v === 'string' ? (mapping.get(v) || v) : Array.isArray(v) ? v.map(remap) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, remap(x)])) : v;
+    const sourceWorkspace = copy.type === 'code' ? copy.props.workspace : undefined;
     copy.props = remap(copy.props) as Fields;
+    // Source file contents and task arguments are opaque, not graph references.
+    if (sourceWorkspace !== undefined) copy.props.workspace = sourceWorkspace;
     copy.locked = false;
     if (mode !== 'independent') {
         copy.sourceId = p.id;

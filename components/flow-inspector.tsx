@@ -1,0 +1,18 @@
+"use client";
+import { useMemo, useState } from 'react';
+import { type CodeProject } from '@/lib/code-project';
+import { inspectFlow } from '@/lib/flow-inspector';
+import { Choice } from './editor-controls';
+
+export function ImportedFlowInspector({ project, ar }: { project: CodeProject; ar: boolean }) {
+  const [path, setPath] = useState(''), [selected, setSelected] = useState(''), t = (en: string, a: string) => ar ? a : en;
+  const candidates = useMemo(() => project.files.filter(f => f.encoding === 'utf8' && f.path.endsWith('.json')).map(f => { try { const flow = inspectFlow(f.content); return flow ? { path: f.path, flow, error: '' } : null; } catch (e) { return { path: f.path, flow: null, error: (e as Error).message }; } }).filter(x => x !== null), [project.files]);
+  const item = candidates.find(f => f.path === path) || candidates[0], flow = item?.flow;
+  const minX = flow?.nodes.length ? Math.min(...flow.nodes.map(n => n.x)) : 0, minY = flow?.nodes.length ? Math.min(...flow.nodes.map(n => n.y)) : 0;
+  const positions = new Map(flow?.nodes.map(n => [n.id, { x: n.x - minX + 30, y: n.y - minY + 30 }]) || []);
+  const w = Math.max(700, ...[...positions.values()].map(p => p.x + 220)), h = Math.max(360, ...[...positions.values()].map(p => p.y + 100));
+  const current = flow?.nodes.find(n => n.id === selected);
+  return <section className="imported-flow"><h3>{t('Imported node workflows', 'مخططات النودز المستوردة')}</h3><p className="muted">{t('Inspect n8n and Node-RED JSON graphs and node settings. Execution needs their own engines, installed nodes and credentials. Edit the original JSON in Files; exporting preserves its format.', 'افحص مخططات n8n وNode-RED بصيغة JSON وإعدادات النودز. التشغيل يحتاج محركاتها والنودز المثبتة وبيانات اعتمادها. عدّل JSON الأصلي من الملفات؛ يحافظ التصدير على صيغته.')}</p>
+    {!item ? <p className="empty-row">{t('Import an exported n8n or Node-RED JSON flow to inspect it here.', 'استورد ملف JSON مُصدّرًا من n8n أو Node-RED لعرضه هنا.')}</p> : <><Choice label={t('Workflow file', 'ملف المخطط')} value={item.path} options={candidates.map(f => ({ value: f.path, label: f.path }))} onChange={p => { setPath(p); setSelected(''); }}/>{item.error && <p role="alert">{item.error}</p>}{flow && <><p>{flow.format} · {flow.nodes.length} {t('nodes', 'نود')} · {flow.edges.length} {t('connections', 'رابط')}</p>{flow.unresolved > 0 && <p className="notice">{flow.unresolved} {t('references could not be resolved.', 'مراجع لم تُربط بنود موجود.')}</p>}<div className="flow-map"><svg viewBox={`0 0 ${w} ${h}`} role="img" aria-label={t('Imported workflow graph', 'مخطط النودز المستورد')}><title>{item.path}</title>{flow.edges.map((e, i) => { const a = positions.get(e.from)!, b = positions.get(e.to)!; return <path key={i} d={`M${a.x + 190},${a.y + 35} C${a.x + 240},${a.y + 35} ${b.x - 50},${b.y + 35} ${b.x},${b.y + 35}`} stroke="#7195ec" strokeWidth="2" fill="none"/>; })}{flow.nodes.map(n => { const p = positions.get(n.id)!; return <g key={n.id} transform={`translate(${p.x},${p.y})`}><rect width="190" height="70" rx="12" fill={selected === n.id ? '#3459a7' : '#1c304f'} stroke="#6e91d8"/><text x="14" y="28" fill="#eef4ff" fontSize="14">{n.name.slice(0,23)}</text><text x="14" y="51" fill="#a6bee7" fontSize="11">{n.type.split('.').pop()?.slice(0,27)}</text></g>; })}</svg></div><Choice label={t('Inspect node', 'فحص نود')} value={selected} onChange={setSelected} options={[{ value: '', label: t('Choose node', 'اختر نود') }, ...flow.nodes.map(n => ({ value: n.id, label: n.name }))]}/>{current && <pre className="flow-node-details" dir="ltr">{JSON.stringify(current.data, null, 2)}</pre>}</>}</>}
+  </section>;
+}

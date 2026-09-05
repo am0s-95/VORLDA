@@ -1,0 +1,53 @@
+import { readFile, realpath } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { resolve, relative, isAbsolute } from 'node:path';
+import { spawn } from 'node:child_process';
+
+const root = await realpath(fileURLToPath(new URL('../', import.meta.url)));
+const manifest = JSON.parse(await readFile(new URL('manifest.json', import.meta.url), 'utf8'));
+const tasks = manifest.tasks;
+if (!Array.isArray(tasks) || tasks.length > 40) throw Error('Invalid task manifest.');
+const byId = new Map();
+for (const t of tasks) {
+  if (!/^[\w-]{1,50}$/.test(t.id) || byId.has(t.id) || !Array.isArray(t.command) || !t.command.length || t.command.length > 40 || t.command.some(v => typeof v !== 'string' || !v || /[\0\r\n]/.test(v)) || !Array.isArray(t.dependsOn) || typeof t.cwd !== 'string') throw Error('Invalid task.');
+  byId.set(t.id, t);
+}
+const needed = new Set(), active = new Set();
+function visit(id) { if (active.has(id)) throw Error('Dependency cycle.'); if (needed.has(id)) return; const t = byId.get(id); if (!t) throw Error('Unknown task: ' + id); active.add(id); t.dependsOn.forEach(visit); active.delete(id); needed.add(id); }
+for (const t of tasks) visit(t.id);
+const [mode, target, ...flags] = process.argv.slice(2);
+if (!mode || mode === 'plan') {
+  console.log(JSON.stringify({ runtime: process.version, os: process.platform, architecture: process.arch, tasks }, null, 2));
+} else if (mode === 'run') {
+  if (!flags.includes('--allow-commands')) throw Error('Review commands first. Add --allow-commands to execute trusted code in your own environment. This runner is not a sandbox.');
+  needed.clear(); visit(target);
+  const rawParallel = flags.find(v => v.startsWith('--parallel='))?.split('=')[1] || '1', parallel = Number(rawParallel);
+  if (!Number.isInteger(parallel) || parallel < 1 || parallel > 4) throw Error('Parallel must be 1–4.');
+  const done = new Set(), running = new Map(); let failure;
+  const stopAll = () => { for (const child of running.values()) { try { if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch {} } };
+  const interrupted = () => { stopAll(); process.exit(130); };
+  process.once('SIGINT', interrupted); process.once('SIGTERM', interrupted);
+  process.once('exit', stopAll);
+  async function run(t) {
+    const cwd = await realpath(resolve(root, t.cwd)), rel = relative(root, cwd);
+    if (rel === '..' || rel.startsWith('..' + (process.platform === 'win32' ? '\\' : '/')) || isAbsolute(rel)) throw Error('Task directory escapes project.');
+    const [program, ...args] = t.command;
+    if (process.platform === 'win32' && /^(npm|pnpm|yarn)(\.cmd)?$/i.test(program)) throw Error('Run this package-manager task in your Windows terminal or WSL; this runner does not invoke a command shell.');
+    await new Promise((ok, fail) => {
+      const child = spawn(program === 'node' ? process.execPath : program, args, { cwd, shell: false, stdio: 'inherit', detached: process.platform !== 'win32' });
+      running.set(t.id, child);
+      const stop = () => { try { if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch {} };
+      const timer = setTimeout(() => { stop(); fail(Error('Task deadline exceeded: ' + t.id)); }, 120000);
+      child.once('error', e => { clearTimeout(timer); running.delete(t.id); fail(e); });
+      child.once('exit', (code, signal) => { clearTimeout(timer); running.delete(t.id); code === 0 ? ok() : fail(Error(`${t.id} exited ${code ?? signal}`)); });
+    });
+    done.add(t.id);
+  }
+  while (done.size < needed.size) {
+    const batch = [...needed].filter(id => !done.has(id) && byId.get(id).dependsOn.every(x => done.has(x))).slice(0, parallel);
+    if (!batch.length) throw Error('No runnable task.');
+    const results = await Promise.allSettled(batch.map(id => run(byId.get(id)).catch(e => { stopAll(); throw e; })));
+    failure = results.find(r => r.status === 'rejected'); if (failure) throw failure.reason;
+  }
+  console.log(JSON.stringify({ status: 'completed', tasks: [...done], runtime: process.version, os: process.platform, architecture: process.arch }));
+} else throw Error('Use plan or run TASK_ID --allow-commands.');
