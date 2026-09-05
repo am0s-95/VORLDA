@@ -34,6 +34,9 @@ test("built Worker renders the workshop and routes its authenticated API", async
   assert.match(html, /vorlda-icon\.png/);
   assert.match(html, /مكتبة الإنتاج/);
   assert.match(html, /الإنتاج والعمليات/);
+  assert.match(html, /التصدير والنشر/);
+  assert.match(html, /طريقة الاستخدام/);
+  assert.match(html, /workspace-overview/);
   assert.doesNotMatch(html, developmentPreviewMeta);
   assert.doesNotMatch(html, /Starter Project/);
   const denied = await worker.fetch(new Request("https://test.local/api/bootstrap"), {}, {waitUntil(){},passThroughOnException(){}});
